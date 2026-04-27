@@ -101,10 +101,32 @@ export class Extractor {
       return { candidates: [], workflow: null, triage, costUsd: 0.0001 };
     }
 
-    const memoryCategories = triage.present.filter(
+    // Defense against LLM hallucination: triage prompts list 7 categories
+    // (code-pattern, preference, architecture-decision, mental-model, glossary,
+    // anti-pattern, workflow) but Haiku occasionally returns made-up labels
+    // like "convention". Drop anything we don't have a prompt file for.
+    const validCategories: Set<Category> = new Set([
+      "code-pattern",
+      "preference",
+      "architecture-decision",
+      "mental-model",
+      "glossary",
+      "anti-pattern",
+      "workflow",
+    ]);
+    const filtered = triage.present.filter((c) => validCategories.has(c as Category));
+    if (filtered.length < triage.present.length) {
+      // Replace triage.present with the cleaned list so logging reflects reality.
+      triage.present = filtered;
+    }
+    if (filtered.length === 0) {
+      return { candidates: [], workflow: null, triage, costUsd: 0.0001 };
+    }
+
+    const memoryCategories = filtered.filter(
       (c) => c !== "workflow"
     ) as Category[];
-    const hasWorkflow = triage.present.includes("workflow");
+    const hasWorkflow = filtered.includes("workflow");
 
     const promises: Promise<MemoryCandidate[] | WorkflowCandidate | null>[] = [];
     for (const cat of memoryCategories) {
