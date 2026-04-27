@@ -1,6 +1,11 @@
 import type { Piece, EventBus } from "@jarvis/core";
 import { v4 as uuid } from "uuid";
-import type { TurnContext, Memory, MemoryCandidate } from "../lib/types";
+import type {
+  TurnContext,
+  Memory,
+  MemoryCandidate,
+  Workflow,
+} from "../lib/types";
 import type { Extractor } from "../lib/extractor";
 import type { MnemosyneStore } from "../lib/store";
 import type { Logger } from "../lib/logger";
@@ -93,7 +98,24 @@ export class EncoderPiece implements Piece {
     }
 
     if (result.workflow) {
-      // Workflow persistence handled in Task 8
+      const wf: Workflow = {
+        id: uuid(),
+        name: result.workflow.workflow.name,
+        description: result.workflow.workflow.description ?? "",
+        trigger: result.workflow.workflow.trigger,
+        outcome: result.workflow.workflow.outcome,
+        applies_to_project: result.workflow.workflow.applies_to_project,
+        steps: result.workflow.workflow.steps.map((s) => ({
+          ...s,
+          id: uuid(),
+        })),
+        branches: result.workflow.workflow.branches ?? [],
+        confidence: result.workflow.workflow.confidence,
+        reinforcements: 0,
+        created_at: Date.now(),
+        last_used: Date.now(),
+      };
+      await this.store.neo4j.upsertWorkflow(wf);
     }
   }
 

@@ -1,6 +1,6 @@
 import neo4j, { Driver, Session } from "neo4j-driver";
 import { promises as fs } from "fs";
-import type { Memory } from "./types";
+import type { Memory, Workflow, WorkflowStep } from "./types";
 
 export interface Neo4jAdapterOptions {
   uri: string;
@@ -202,5 +202,172 @@ export class Neo4jAdapter {
       promoted_at: props.promoted_at?.toNumber?.() ?? props.promoted_at,
       source_session: props.source_session,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Workflows (Task 8)
+  //
+  // Schema:
+  //   (Workflow {id, name, description, trigger, outcome, confidence,
+  //              reinforcements, created_at, last_used})
+  //   (Step {id, action, tool, guard, required, confirms_required, order})
+  //   (Workflow)-[:STARTS_AT]->(Step)
+  //   (Workflow)-[:ENDS_AT]->(Step)
+  //   (Step)-[:NEXT {order, probability}]->(Step)
+  //   (Workflow)-[:APPLIES_TO]->(Project {name})
+  // ---------------------------------------------------------------------------
+
+  async upsertWorkflow(wf: Workflow): Promise<void> {
+    const s = this.session();
+    try {
+      await s.executeWrite(async (tx) => {
+        await tx.run(
+          `MERGE (w:Workflow {id: $id})
+           SET w += $props`,
+          {
+            id: wf.id,
+            props: {
+              name: wf.name,
+              description: wf.description,
+              trigger: wf.trigger,
+              outcome: wf.outcome,
+              confidence: wf.confidence,
+              reinforcements: wf.reinforcements,
+              created_at: wf.created_at,
+              last_used: wf.last_used,
+            },
+          }
+        );
+
+        // Steps
+        for (const step of wf.steps) {
+          await tx.run(
+            `MERGE (s:Step {id: $id})
+             SET s += $props`,
+            {
+              id: step.id,
+              props: {
+                action: step.action,
+                tool: step.tool,
+                guard: step.guard,
+                required: step.required,
+                confirms_required: step.confirms_required,
+                order: step.order,
+              },
+            }
+          );
+        }
+
+        // STARTS_AT, ENDS_AT, NEXT
+        const sorted = [...wf.steps].sort((a, b) => a.order - b.order);
+        if (sorted.length) {
+          await tx.run(
+            `MATCH (w:Workflow {id: $wfId}), (s:Step {id: $sId})
+             MERGE (w)-[:STARTS_AT]->(s)`,
+            { wfId: wf.id, sId: sorted[0].id }
+          );
+          await tx.run(
+            `MATCH (w:Workflow {id: $wfId}), (s:Step {id: $sId})
+             MERGE (w)-[:ENDS_AT]->(s)`,
+            { wfId: wf.id, sId: sorted[sorted.length - 1].id }
+          );
+        }
+        for (let i = 0; i < sorted.length - 1; i++) {
+          await tx.run(
+            `MATCH (a:Step {id: $aId}), (b:Step {id: $bId})
+             MERGE (a)-[r:NEXT]->(b)
+             SET r.order = $order, r.probability = 1.0`,
+            { aId: sorted[i].id, bId: sorted[i + 1].id, order: i + 1 }
+          );
+        }
+
+        // APPLIES_TO project
+        if (wf.applies_to_project) {
+          await tx.run(
+            `MERGE (p:Project {name: $name})
+             WITH p
+             MATCH (w:Workflow {id: $wfId})
+             MERGE (w)-[:APPLIES_TO]->(p)`,
+            { name: wf.applies_to_project, wfId: wf.id }
+          );
+        }
+      });
+    } finally {
+      await s.close();
+    }
+  }
+
+  async getWorkflow(idOrName: string): Promise<Workflow | null> {
+    const s = this.session();
+    try {
+      const result = await s.run(
+        `MATCH (w:Workflow) WHERE w.id = $key OR w.name = $key
+         OPTIONAL MATCH (w)-[:STARTS_AT]->(start:Step)
+         OPTIONAL MATCH path = (start)-[:NEXT*0..]->(step:Step)
+         OPTIONAL MATCH (w)-[:APPLIES_TO]->(p:Project)
+         RETURN w, collect(DISTINCT step) AS steps, p.name AS project`,
+        { key: idOrName }
+      );
+      if (!result.records.length) return null;
+      const rec = result.records[0];
+      const wNode = rec.get("w");
+      if (!wNode) return null;
+      const wProps = wNode.properties;
+      const stepsRaw = (rec.get("steps") ?? []).filter(
+        (n: any) => n != null
+      );
+      const steps: WorkflowStep[] = stepsRaw
+        .map((n: any) => {
+          const p = n.properties;
+          return {
+            id: p.id,
+            order: p.order?.toNumber?.() ?? p.order,
+            action: p.action,
+            tool: p.tool,
+            guard: p.guard,
+            required: p.required,
+            confirms_required: p.confirms_required ?? false,
+          } as WorkflowStep;
+        })
+        .sort((a: WorkflowStep, b: WorkflowStep) => a.order - b.order);
+
+      return {
+        id: wProps.id,
+        name: wProps.name,
+        description: wProps.description ?? "",
+        trigger: wProps.trigger,
+        outcome: wProps.outcome,
+        applies_to_project: rec.get("project") ?? null,
+        steps,
+        branches: [],
+        confidence: wProps.confidence?.toNumber?.() ?? wProps.confidence,
+        reinforcements:
+          wProps.reinforcements?.toNumber?.() ?? wProps.reinforcements,
+        created_at: wProps.created_at?.toNumber?.() ?? wProps.created_at,
+        last_used: wProps.last_used?.toNumber?.() ?? wProps.last_used,
+      };
+    } finally {
+      await s.close();
+    }
+  }
+
+  async listWorkflows(filter?: { project?: string }): Promise<Workflow[]> {
+    const s = this.session();
+    try {
+      let cypher = `MATCH (w:Workflow)`;
+      if (filter?.project) {
+        cypher += ` MATCH (w)-[:APPLIES_TO]->(:Project {name: $project})`;
+      }
+      cypher += ` RETURN w.id AS id ORDER BY w.last_used DESC`;
+      const result = await s.run(cypher, { project: filter?.project ?? null });
+      const workflows: Workflow[] = [];
+      for (const rec of result.records) {
+        const wf = await this.getWorkflow(rec.get("id"));
+        if (wf) workflows.push(wf);
+      }
+      return workflows;
+    } finally {
+      await s.close();
+    }
   }
 }
