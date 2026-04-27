@@ -2,7 +2,7 @@
 
 > **MANDATORY.** Every scenario below MUST be executed individually after `plugin_install`,
 > `plugin_update`, or `plugin_enable`. No skipping, no batching, no LLM-judgement shortcuts.
-> The plugin is not considered installed until **all 18 scenarios pass**.
+> The plugin is not considered installed until **all 19 scenarios pass**.
 
 Mnemosyne is a long-term memory plugin modeled on brain memory consolidation. It runs a
 hybrid storage stack — Markdown (canonical) + ChromaDB (vector) + Neo4j (graph) — extracts
@@ -521,6 +521,43 @@ behind the scenes); selecting a category filter chip narrows by category.
 
 **Pass criteria:** The HUD panel correctly renders stats, lists every memory, highlights
 pinned memories with a gold border, and live-filters via the search box and category chips.
+
+---
+
+# System prompt invariant
+
+## Scenario 19: Mnemosyne preserves Block 0 of system prompt (D2 invariant)
+
+**Given:** A JARVIS session with the Mnemosyne plugin DISABLED, and a user message sent to
+capture the baseline system prompt structure.
+**When:** Plugin is enabled, several memories are persisted, and the same user message is
+sent in a fresh session to trigger retrieval (Block 1 should populate).
+**Then:** Block 0 of the system prompt is byte-identical between the two captures — no
+Mnemosyne content, no citation instructions, no behavioral nudges. All memory context lives
+exclusively in Block 1 (dynamic context).
+
+**Verification:**
+1. With plugin DISABLED (`plugin_disable jarvis-plugin-mnemosyne`), call
+   `session_get_system raw=true` against a clean session. Save the response as
+   `prompt_baseline.json` (e.g. via `jarvis_eval` writing to disk, or copy from the tool
+   result). Note Block 0's text content and char count.
+2. `plugin_enable jarvis-plugin-mnemosyne`, wait for bootstrap (Scenario 1 green), then
+   persist 3 distinct memories — either by sending three extracting turns (Scenario 5/6
+   patterns) or by writing markdown directly and running `npx tsx scripts/rebuild-indexes.ts`.
+   Verify via `mnemosyne_stats` that `total_memories >= 3`.
+3. In a fresh session, send a query that should match at least one memory; capture the
+   system prompt with `session_get_system raw=true` and save as `prompt_with_mnemosyne.json`.
+   Verify Block 1 populates — the memory section is non-empty and contains at least one
+   memory id.
+4. Compare Block 0 across both captures — must be byte-identical:
+   `diff <(jq -r '.blocks[0].text' prompt_baseline.json) <(jq -r '.blocks[0].text' prompt_with_mnemosyne.json)`
+   returns empty.
+5. Block 0 contains zero Mnemosyne fingerprints:
+   `jq -r '.blocks[0].text' prompt_with_mnemosyne.json | grep -ciE 'mnemosyne|\[mem:|remembered|previously stated|your preferences'`
+   returns `0`.
+
+**Pass criteria:** Block 0 is byte-for-byte identical with and without the plugin loaded;
+all Mnemosyne-injected content is confined to Block 1.
 
 ---
 
