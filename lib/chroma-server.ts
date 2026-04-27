@@ -37,13 +37,24 @@ export class ChromaServer {
 
   async stop(): Promise<void> {
     if (!this.proc) return;
-    this.proc.kill("SIGTERM");
+    const proc = this.proc;
+    proc.kill("SIGTERM");
     await new Promise<void>((resolve) => {
-      this.proc!.once("exit", () => resolve());
-      setTimeout(() => {
-        this.proc!.kill("SIGKILL");
+      const timer = setTimeout(() => {
+        // Force-kill if SIGTERM didn't take effect within 5s. Guard the kill
+        // because in pathological cases the process may have already exited
+        // (e.g. parent test runner reaped it) before the timer fires.
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // already dead
+        }
         resolve();
       }, 5000);
+      proc.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
     this.proc = undefined;
   }
