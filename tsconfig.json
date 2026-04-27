@@ -15,6 +15,6 @@
       "@jarvis/core": ["../../../dev/personal/jarvis-app/packages/core/src/index.ts"]
     }
   },
-  "include": ["pieces/**/*", "lib/**/*", "renderers/**/*", "test/**/*"],
+  "include": ["pieces/**/*", "lib/**/*", "renderers/**/*", "test/**/*", "scripts/**/*.ts"],
   "exclude": ["node_modules"]
 }
