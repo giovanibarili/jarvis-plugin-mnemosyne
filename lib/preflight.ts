@@ -68,10 +68,15 @@ const checks: PreflightCheck[] = [
     name: `port-${port}`,
     fn: async () => {
       const inUse = await isPortInUse(port);
-      if (inUse) {
-        return { ok: false, reason: `Port ${port} in use`, action: `Stop the conflicting process or change config` };
+      if (!inUse) return { ok: true };
+
+      // Port is bound. Check if it's bound by OUR own service (re-boot scenario).
+      // 7687 / 7474 → mnemosyne-neo4j container; 8765 → Chroma heartbeat.
+      const ownedByUs = await isPortOwnedByMnemosyne(port);
+      if (ownedByUs) {
+        return { ok: true };
       }
-      return { ok: true };
+      return { ok: false, reason: `Port ${port} in use by another process`, action: `Stop the conflicting process or change config` };
     },
   })),
   {
@@ -98,6 +103,43 @@ async function isPortInUse(port: number): Promise<boolean> {
     });
     server.listen(port, "127.0.0.1");
   });
+}
+
+/**
+ * Check if a bound port is owned by our own Mnemosyne services.
+ *
+ * This makes preflight idempotent — re-running on a host where Mnemosyne
+ * is already up should NOT report port conflicts. Conflicts only matter
+ * when ANOTHER process holds the port.
+ *
+ * - 7687 / 7474 → mnemosyne-neo4j container running + bound to 127.0.0.1
+ * - 8765         → Chroma server responding to heartbeat
+ */
+async function isPortOwnedByMnemosyne(port: number): Promise<boolean> {
+  if (port === 7687 || port === 7474) {
+    try {
+      const { stdout: state } = await exec("docker", [
+        "inspect", "mnemosyne-neo4j",
+        "--format", "{{.State.Running}}",
+      ]);
+      if (state.trim() !== "true") return false;
+      const { stdout: portMap } = await exec("docker", ["port", "mnemosyne-neo4j", String(port)]);
+      return portMap.trim().startsWith("127.0.0.1:");
+    } catch {
+      return false;
+    }
+  }
+  if (port === 8765) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/v2/heartbeat`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 export async function preflight(): Promise<void> {

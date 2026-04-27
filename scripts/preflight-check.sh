@@ -122,11 +122,36 @@ else
 fi
 
 # --- ports -------------------------------------------------------------------
+# A port being "in use" is only a problem if it's NOT us. Re-running preflight
+# on a host where Mnemosyne is already up should pass cleanly.
+#   7687 / 7474 → owned by us if mnemosyne-neo4j container is running + 127.0.0.1
+#   8765        → owned by us if Chroma heartbeat responds
+port_owned_by_us() {
+  local port=$1
+  case "$port" in
+    7687|7474)
+      if ! command -v docker >/dev/null 2>&1; then return 1; fi
+      local running
+      running=$(docker inspect mnemosyne-neo4j --format '{{.State.Running}}' 2>/dev/null || echo "")
+      [[ "$running" == "true" ]] || return 1
+      docker port mnemosyne-neo4j "$port" 2>/dev/null | grep -q "^127.0.0.1:"
+      ;;
+    8765)
+      curl -fsS --max-time 2 "http://127.0.0.1:$port/api/v2/heartbeat" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 for port in "${PORTS[@]}"; do
   if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
-    proc=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, "pid="$2}')
-    check "port-$port" 1 "in use ($proc)" \
-      "Stop the process or change config"
+    if port_owned_by_us "$port"; then
+      check "port-$port" 0 "in use by mnemosyne (ok)"
+    else
+      proc=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1, "pid="$2}')
+      check "port-$port" 1 "in use by another process ($proc)" \
+        "Stop the process or change config"
+    fi
   else
     check "port-$port" 0 "free"
   fi
