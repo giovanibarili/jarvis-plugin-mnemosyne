@@ -309,42 +309,59 @@ async function loadOrCreateConfig(configPath: string): Promise<any> {
  * the LLM lazily on incoming turns, and no turns flow until the plugin is
  * actually loaded into a JARVIS runtime. Tasks 13-16 will exercise this.
  */
+/**
+ * LLM bridge for the Extractor / ConflictDetector.
+ *
+ * Uses ctx.sessionFactory directly — bypasses the bus entirely. Each call
+ * creates an ephemeral AISession, streams its response, accumulates the
+ * text, and closes the session. No phantom session pollution, no stream
+ * filtering, no replyTo correlation — the SDK handles it natively.
+ *
+ * Failure modes:
+ *   - 60s hard timeout (model load + extraction can be ~5-30s for Haiku;
+ *     headroom of 60s is generous and prevents unbounded hangs).
+ *   - Stream emits an `error` event → throws with that message.
+ *   - Empty response → returns "" (caller validates).
+ */
 function makeLLMClient(ctx: PluginContext): LLMClient {
   return {
-    async call({ system, user, maxTokens, model }) {
-      return new Promise<string>((resolve, reject) => {
-        const replyChannel = `mnemosyne-llm-${crypto.randomUUID()}`;
-        const timeout = setTimeout(() => {
-          unsubscribe();
-          reject(new Error(`LLM call timed out after 30s (model=${model ?? "default"})`));
-        }, 30_000);
-
-        const unsubscribe = ctx.bus.subscribe("ai.stream", (msg) => {
-          const m = msg as { event?: string; text?: string; replyTo?: string; error?: string };
-          if ((m as any).target !== replyChannel) return;
-          if (m.event === "complete") {
-            clearTimeout(timeout);
-            unsubscribe();
-            resolve(m.text ?? "");
-          } else if (m.event === "error") {
-            clearTimeout(timeout);
-            unsubscribe();
-            reject(new Error(m.error ?? "Unknown LLM error"));
-          }
-        });
-
-        ctx.bus.publish({
-          channel: "ai.request",
-          source: "mnemosyne-llm",
-          target: "providerRouter",
-          text: `${system}\n\n${user}`,
-          replyTo: replyChannel,
-          data: {
-            maxTokens: maxTokens ?? 800,
-            model: model ?? "claude-haiku-3-5",
-          },
-        });
+    async call({ system, user }) {
+      const factory = ctx.sessionFactory;
+      const session = factory.createWithPrompt({
+        label: `mnemosyne-llm-${crypto.randomUUID().slice(0, 8)}`,
+        basePromptOverride: system,
       });
+
+      try {
+        const ac = new AbortController();
+        const timeoutId = setTimeout(() => ac.abort(), 60_000);
+
+        let text = "";
+        let errored: string | undefined;
+
+        try {
+          for await (const event of session.sendAndStream(user)) {
+            if (ac.signal.aborted) {
+              throw new Error("LLM call timed out after 60s");
+            }
+            if (event.type === "text_delta" && event.text) {
+              text += event.text;
+            } else if (event.type === "error") {
+              errored = event.error ?? "Unknown LLM error";
+              break;
+            } else if (event.type === "message_complete") {
+              break;
+            }
+          }
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        if (errored) throw new Error(errored);
+        return text;
+      } finally {
+        session.close();
+      }
     },
   };
 }
