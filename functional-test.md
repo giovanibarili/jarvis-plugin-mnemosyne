@@ -156,7 +156,7 @@ stays at 0; the extraction log records `pass: 1, skip_reason: "casual conversati
 1. Send the casual turn and wait ~5 seconds for encoder completion.
 2. Run `npx tsx scripts/check-stats.ts` from the plugin root — markdown / chroma / neo4j
    counts must all be `0`.
-3. Inspect `~/.jarvis/mnemosyne/logs/extraction.log` (last entry) — must contain
+3. Inspect `~/.jarvis/mnemosyne/extraction.log` (last entry) — must contain
    `"pass": 1` and `"skip_reason"` with a casual-conversation phrase.
 4. Call the `mnemosyne_stats` tool — `total_memories: 0`.
 
@@ -286,8 +286,8 @@ content (use `memory_search` with `__sessionId="main"` or trigger from the main 
 3. Send the same query as `actor-foo` (via `actor_dispatch foo nu-discovery-agent "search
    memory: <query>"`) — the actor's response references `M` (or the bus publishes a
    `memory_search` result containing `M.id`).
-4. Inspect the retriever log — entry for `main` shows `M` filtered with reason
-   `visibility=private, session_mismatch`.
+4. Call `memory_explain` with the query as `actor-foo` — the explanation includes M with
+   non-zero score; calling it as `main` returns no entry for M (filtered before reranking).
 
 **Pass criteria:** `M` is invisible to `main` and visible to `actor-foo` with the filter
 explicitly recorded.
@@ -309,9 +309,9 @@ A and B with an explicit conflict marker (e.g. `⚠ contradicts <other-id>` or a
 1. Confirm edge: Cypher `MATCH (:Memory {id:'<A>'})-[:CONTRADICTS]->(:Memory {id:'<B>'}) RETURN 1` returns one.
 2. Call `memory_explain` with the query and `topK: 5` — the response payload includes both
    memories and an explicit conflict annotation referencing the partner id.
-3. Inspect the retriever's output text used for Block 1 (read the most recent entry in
-   `~/.jarvis/mnemosyne/logs/retriever.log`) — it includes both memories and a marker word
-   (`contradicts`, `conflict`, or `⚠`).
+3. In a JARVIS chat session, send the query verbatim and use `session_get_system raw=true`
+   to dump the system prompt; the dynamic Block 1 contains both memories with a conflict
+   marker (`contradicts`, `conflict`, or `⚠`).
 4. Open the HUD Conflicts tab — the pair appears as a row.
 
 **Pass criteria:** The retrieved block includes both contradicting memories together with
@@ -330,7 +330,7 @@ frontmatter to make the test deterministic, then run `npx tsx scripts/rebuild-in
 **When:** I invoke the `mnemosyne_consolidate` tool (which runs the full consolidator
 pipeline, equivalent to the 3am cron).
 **Then:** `M` is moved to `~/.jarvis/mnemosyne/long/<category>/<slug>.md`; the short-term
-file no longer exists; the Neo4j node updates `tier: "long"`; consolidator log records
+file no longer exists; the Neo4j node updates `tier: "long"`; consolidation log records
 `promoted: [<M.id>]`.
 
 **Verification:**
@@ -339,7 +339,7 @@ file no longer exists; the Neo4j node updates `tier: "long"`; consolidator log r
 3. `ls ~/.jarvis/mnemosyne/short/<category>/<slug>.md` returns "No such file" and
    `ls ~/.jarvis/mnemosyne/long/<category>/<slug>.md` exists.
 4. Cypher: `MATCH (m:Memory {id:'<M.id>'}) RETURN m.tier` returns `"long"`.
-5. `~/.jarvis/mnemosyne/logs/consolidator.log` last entry contains the id under `promoted`.
+5. `~/.jarvis/mnemosyne/consolidation.log` last entry contains the id under `promoted`.
 
 **Pass criteria:** File moved, Neo4j tier updated, log recorded the promotion.
 
@@ -354,7 +354,7 @@ configured `consolidator.decay_threshold`. Set the frontmatter directly and run
 **When:** I invoke `mnemosyne_consolidate`.
 **Then:** `M` is removed from all three layers — markdown file deleted, Chroma document
 deleted, Neo4j node deleted (or marked `tombstoned: true` per implementation). The
-consolidator log records `decayed: [<M.id>]`.
+consolidation log records `decayed: [<M.id>]`.
 
 **Verification:**
 1. Pre-run: confirm `M`'s frontmatter values and that `forgetScore` (per
@@ -363,7 +363,7 @@ consolidator log records `decayed: [<M.id>]`.
 3. `ls <markdown-path>` returns "No such file".
 4. Call `memory_get` with `<M.id>` — returns `success: false, error: "not found"`.
 5. Cypher: `MATCH (m:Memory {id:'<M.id>'}) RETURN m` returns 0 rows.
-6. `consolidator.log` records `<M.id>` under `decayed`.
+6. `consolidation.log` records `<M.id>` under `decayed`.
 
 **Pass criteria:** Memory is gone from all three layers; an immediately-following
 `memory_search` for its content returns nothing.
@@ -387,7 +387,7 @@ Neo4j; the Conflicts HUD tab shows the pair.
 4. Cypher: `MATCH (a:Memory {id:'<A.id>'})-[r:CONTRADICTS]-(b:Memory) RETURN b.id` returns
    `<B.id>` (edge may be directional or undirected — accept either).
 5. Open HUD Conflicts tab — row showing both memories with a "Resolve" action.
-6. `consolidator.log` last entry contains `conflicts: [{a: "<A.id>", b: "<B.id>"}]`.
+6. `consolidation.log` last entry contains `conflicts: [{a: "<A.id>", b: "<B.id>"}]`.
 
 **Pass criteria:** `CONTRADICTS` edge exists in Neo4j and the pair is listed in the HUD.
 
@@ -410,7 +410,7 @@ manual steps); step 2 is logged as `skipped`; the replay log records all three d
 1. `workflow_get <W.name>` confirms three steps with the expected order.
 2. Invoke `workflow_replay` and respond as above (interaction surface is the
    `WorkflowReplayDialog` HUD renderer or, for headless, the tool's `decisions` parameter).
-3. Inspect `~/.jarvis/mnemosyne/logs/replay.log` — the last entry is a JSON object with a
+3. Inspect `~/.jarvis/mnemosyne/replay.log` — the last entry is a JSON object with a
    `decisions` array of length 3 in the order `["yes","skip","yes"]` and a final
    `outcome: "completed"`.
 4. If steps 1 and 3 had `command` fields, side effects observable (e.g. file created); for
@@ -479,7 +479,7 @@ decay-eligible memory (combine setup from Scenarios 11 and 12).
 **When:** I invoke the `mnemosyne_consolidate` tool with no arguments.
 **Then:** The tool returns a structured report with counts for `dedup`, `promoted`,
 `decayed`, `conflicts_detected`, and `duration_ms`; all four phases ran (verifiable in
-`consolidator.log`); the side effects observed individually in Scenarios 11–13 hold here
+`consolidation.log`); the side effects observed individually in Scenarios 11–13 hold here
 too (promotion file moved, decay deletion, conflict edge if applicable).
 
 **Verification:**
@@ -487,7 +487,7 @@ too (promotion file moved, decay deletion, conflict edge if applicable).
 2. Invoke `mnemosyne_consolidate`.
 3. Response payload includes all five fields; `duration_ms > 0`; `promoted >= 1` and
    `decayed >= 1`.
-4. `~/.jarvis/mnemosyne/logs/consolidator.log` last entry has timestamps for each phase
+4. `~/.jarvis/mnemosyne/consolidation.log` last entry has timestamps for each phase
    (`dedup`, `promote`, `decay`, `conflict`) all within the last minute.
 5. Post-run: `mnemosyne_stats` shows the long-term tier increased and total decreased
    relative to pre-run snapshot.
@@ -531,11 +531,11 @@ pinned memories with a gold border, and live-filters via the search box and cate
 | Boot fails with `port-7687` red | Another process or another Neo4j is bound to 7687 | `lsof -nP -iTCP:7687 -sTCP:LISTEN` → kill the offender, or stop the other Neo4j |
 | Boot fails with `docker-running` red | Docker daemon is stopped | Start Docker Desktop (macOS) or `sudo systemctl start docker` (Linux) |
 | Boot fails with `chroma-server` red | Python / `chromadb` package missing | `python3 -m pip install --user chromadb`; verify with `python3 -c "import chromadb"` |
-| Encoder never persists memories | LLM provider unreachable or rate-limited | Check `~/.jarvis/mnemosyne/logs/extraction.log` for HTTP errors; confirm `model_get` returns a healthy provider |
+| Encoder never persists memories | LLM provider unreachable or rate-limited | Check `~/.jarvis/mnemosyne/extraction.log` for HTTP errors; confirm `model_get` returns a healthy provider |
 | Stats divergence between markdown / Chroma / Neo4j | Manual edits or partial wipe | `npx tsx scripts/rebuild-indexes.ts` rebuilds derived stores from canonical markdown |
 | HUD panel does not render | Plugin disabled mid-boot | `plugin_list` to confirm enabled; `piece_enable mnemosyne` to retry |
 | Replay halts when it should continue | A step was tagged `required: true` unintentionally | `workflow_get <name>` to inspect; edit step `required` flag in Neo4j or recreate workflow |
-| `mnemosyne_consolidate` returns zero counts unexpectedly | No memory met any threshold | Check `consolidator.log` — likely correct behaviour; lower thresholds in `config.json` only for testing |
+| `mnemosyne_consolidate` returns zero counts unexpectedly | No memory met any threshold | Check `consolidation.log` — likely correct behaviour; lower thresholds in `config.json` only for testing |
 | Test pollution between scenarios | Forgot to wipe state | `./scripts/wipe-test-state.sh --yes` and re-enable the plugin |
 
 ---
