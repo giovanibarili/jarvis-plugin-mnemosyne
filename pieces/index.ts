@@ -21,6 +21,28 @@ import { EncoderPiece } from "./encoder.js";
 import { RetrieverPiece } from "./retriever.js";
 import { ConsolidatorPiece } from "./consolidator.js";
 import { PanelPiece } from "./panel.js";
+import {
+  buildMemorySearchTool,
+  buildMemoryGetTool,
+  buildMemoryListTool,
+  buildMemoryExplainTool,
+} from "../lib/tools/memory-search.js";
+import {
+  buildMemoryUpdateTool,
+  buildMemoryPinTool,
+  buildMemoryUnpinTool,
+  buildMemoryDeleteTool,
+  buildMemoryPromoteTool,
+} from "../lib/tools/memory-management.js";
+import {
+  buildWorkflowListTool,
+  buildWorkflowGetTool,
+  buildWorkflowReplayTool,
+} from "../lib/tools/workflow-tools.js";
+import {
+  buildMnemosyneConsolidateTool,
+  buildMnemosyneStatsTool,
+} from "../lib/tools/admin-tools.js";
 
 // ESM equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -170,8 +192,8 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
 
-  // 9. Tool registration — Task 13 fills this in
-  registerTools(ctx, store, neo4j, consolidator, replayEngine);
+  // 9. Tool registration (Task 13)
+  registerTools(ctx, store, neo4j, consolidator, replayEngine, config.retriever.rerank_weights);
 
   return {
     observer,
@@ -354,21 +376,57 @@ function registerCron(ctx: PluginContext, cron: string): void {
 }
 
 /**
- * Tool registration — Task 13 will register memory_search, memory_forget,
- * memory_pin, workflow_list, workflow_replay, etc. against
- * ctx.capabilityRegistry. Empty body for now so the plugin loads cleanly.
+ * Tool registration — 14 capabilities exposed to the assistant per
+ * architecture.md "Tools expostos ao assistant".
+ *
+ * Groups (mirroring lib/tools/* modules):
+ *   - memory-search:     memory_search, memory_get, memory_list, memory_explain
+ *   - memory-management: memory_update, memory_pin, memory_unpin,
+ *                        memory_delete, memory_promote
+ *   - workflow-tools:    workflow_list, workflow_get, workflow_replay
+ *   - admin-tools:       mnemosyne_consolidate, mnemosyne_stats
+ *
+ * Each builder returns a `CapabilityDefinition` (per @jarvis/core/types.ts):
+ * `{ name, description, input_schema, handler }`. The CapabilityExecutor
+ * picks them up off the `capability.request` channel using the
+ * `{ source, calls: [{id, name, input}] }` envelope shape (errata #22).
  */
+interface RerankWeights {
+  recency: number;
+  confidence: number;
+  reinforcements: number;
+  graph_distance: number;
+}
+
 function registerTools(
   ctx: PluginContext,
   store: MnemosyneStore,
   neo4j: Neo4jAdapter,
   consolidator: ConsolidatorPiece,
-  replay: ReplayEngine
+  replay: ReplayEngine,
+  rerankWeights: RerankWeights
 ): void {
-  // TODO(Task 13): register Mnemosyne capabilities here
-  void ctx;
-  void store;
-  void neo4j;
-  void consolidator;
-  void replay;
+  const reg = ctx.capabilityRegistry;
+
+  // Memory — search & inspection
+  reg.register(buildMemorySearchTool(store));
+  reg.register(buildMemoryGetTool(store));
+  reg.register(buildMemoryListTool(store));
+  reg.register(buildMemoryExplainTool(store, rerankWeights));
+
+  // Memory — management
+  reg.register(buildMemoryUpdateTool(store));
+  reg.register(buildMemoryPinTool(store));
+  reg.register(buildMemoryUnpinTool(store));
+  reg.register(buildMemoryDeleteTool(store));
+  reg.register(buildMemoryPromoteTool(store));
+
+  // Workflows
+  reg.register(buildWorkflowListTool(neo4j));
+  reg.register(buildWorkflowGetTool(neo4j));
+  reg.register(buildWorkflowReplayTool(neo4j, replay));
+
+  // Admin
+  reg.register(buildMnemosyneConsolidateTool(consolidator));
+  reg.register(buildMnemosyneStatsTool(store));
 }

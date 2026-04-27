@@ -1,0 +1,324 @@
+import type { CapabilityDefinition } from "@jarvis/core";
+import type { MnemosyneStore } from "../store.js";
+import type { Memory, Category } from "../types.js";
+import type { ListFilter, Layer } from "../markdown-store.js";
+
+/**
+ * Resolve an id parameter — supports full uuid or unique short prefix
+ * (≥4 chars). Returns the matched Memory or null if not found / ambiguous.
+ *
+ * Short-prefix matching mirrors `git rev-parse --short` semantics — the
+ * caller wants a quick way to address a memory without copying the full
+ * uuid from the HUD. Ambiguous prefixes resolve to `null` (not error)
+ * so callers can fall back to the full id message uniformly.
+ */
+export async function resolveMemoryId(
+  store: MnemosyneStore,
+  idOrPrefix: string
+): Promise<Memory | null> {
+  if (!idOrPrefix) return null;
+  // Fast path: full id
+  const direct = await store.markdownStore.read(idOrPrefix);
+  if (direct) return direct;
+  if (idOrPrefix.length < 4) return null;
+
+  // Slow path: scan all memories for prefix matches
+  const all = await store.markdownStore.list({});
+  const matches = all.filter((m) => m.id.startsWith(idOrPrefix));
+  if (matches.length === 1) return matches[0];
+  return null;
+}
+
+/* -------------------------------------------------------------- shapes ---- */
+
+interface MemorySearchArgs {
+  query: string;
+  k?: number;
+  layer?: "short" | "long" | "both";
+  category?: Category;
+  project?: string;
+}
+
+interface MemoryGetArgs {
+  id: string;
+}
+
+interface MemoryListArgs {
+  category?: Category;
+  project?: string;
+  layer?: Layer;
+  pinned?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+interface MemoryExplainArgs {
+  id: string;
+  query: string;
+}
+
+/* -------------------------------------------------------------- builders -- */
+
+export function buildMemorySearchTool(store: MnemosyneStore): CapabilityDefinition {
+  return {
+    name: "memory_search",
+    description:
+      "Semantic search across personal memories (Mnemosyne). Returns relevant memories ranked by score. Use for questions about preferences, code patterns, decisions, or anything previously remembered.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language search query" },
+        k: { type: "number", default: 5, description: "Max number of results (default 5)" },
+        layer: {
+          type: "string",
+          enum: ["short", "long", "both"],
+          default: "both",
+          description: "Memory layer to search (default both)",
+        },
+        category: {
+          type: "string",
+          enum: [
+            "code-pattern",
+            "preference",
+            "architecture-decision",
+            "mental-model",
+            "glossary",
+            "anti-pattern",
+            "workflow",
+          ],
+          description: "Optional category filter",
+        },
+        project: { type: "string", description: "Optional project filter" },
+      },
+      required: ["query"],
+    },
+    handler: async (raw) => {
+      const args = raw as unknown as MemorySearchArgs;
+      if (!args.query || typeof args.query !== "string") {
+        return { error: "query is required and must be a string" };
+      }
+      const k = args.k ?? 5;
+      const layer = args.layer ?? "both";
+
+      const where: Record<string, any> | undefined =
+        args.category || args.project
+          ? {
+              ...(args.category ? { category: args.category } : {}),
+              ...(args.project ? { project: args.project } : {}),
+            }
+          : undefined;
+
+      const layers: Array<"short" | "long"> =
+        layer === "both" ? ["short", "long"] : [layer];
+
+      const allHits: Array<{
+        id: string;
+        distance: number;
+        layer: "short" | "long";
+      }> = [];
+      for (const l of layers) {
+        const hits = await store.chroma.query(l, args.query, k, where);
+        for (const h of hits) {
+          allHits.push({ id: h.id, distance: h.distance, layer: l });
+        }
+      }
+
+      // Dedup by id (a memory may live in only one layer, but be defensive)
+      const seen = new Set<string>();
+      const ranked = allHits
+        .filter((h) => {
+          if (seen.has(h.id)) return false;
+          seen.add(h.id);
+          return true;
+        })
+        .sort((a, b) => a.distance - b.distance)
+        .slice(0, k);
+
+      const results = [];
+      for (const h of ranked) {
+        const mem = await store.markdownStore.read(h.id);
+        if (!mem) continue;
+        results.push({
+          id: mem.id,
+          title: mem.title,
+          content: mem.content,
+          category: mem.category,
+          project: mem.project,
+          layer: h.layer,
+          score: 1 - h.distance,
+          last_accessed: mem.last_accessed,
+          confidence: mem.confidence,
+          reinforcements: mem.reinforcements,
+          pinned: mem.pinned,
+        });
+      }
+      return { results };
+    },
+  };
+}
+
+export function buildMemoryGetTool(store: MnemosyneStore): CapabilityDefinition {
+  return {
+    name: "memory_get",
+    description:
+      "Fetch a single memory by full id or unique short-id prefix (>=4 chars). Returns the full Memory object or { error: 'not found' }.",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Full uuid or unique short prefix" },
+      },
+      required: ["id"],
+    },
+    handler: async (raw) => {
+      const args = raw as unknown as MemoryGetArgs;
+      if (!args.id) return { error: "id is required" };
+      const mem = await resolveMemoryId(store, args.id);
+      if (!mem) return { error: "not found" };
+      return mem;
+    },
+  };
+}
+
+export function buildMemoryListTool(store: MnemosyneStore): CapabilityDefinition {
+  return {
+    name: "memory_list",
+    description:
+      "Paginated list of memories with optional filters (category, project, layer, pinned). Returns { memories, total }.",
+    input_schema: {
+      type: "object",
+      properties: {
+        category: {
+          type: "string",
+          enum: [
+            "code-pattern",
+            "preference",
+            "architecture-decision",
+            "mental-model",
+            "glossary",
+            "anti-pattern",
+            "workflow",
+          ],
+        },
+        project: { type: "string" },
+        layer: { type: "string", enum: ["short", "long"] },
+        pinned: { type: "boolean" },
+        limit: { type: "number", default: 50 },
+        offset: { type: "number", default: 0 },
+      },
+    },
+    handler: async (raw) => {
+      const args = raw as unknown as MemoryListArgs;
+      const filter: ListFilter = {};
+      if (args.category) filter.category = args.category;
+      if (args.layer) filter.layer = args.layer;
+      if (args.pinned !== undefined) filter.pinned = args.pinned;
+
+      let memories = await store.markdownStore.list(filter);
+      if (args.project !== undefined) {
+        memories = memories.filter((m) => m.project === args.project);
+      }
+      const total = memories.length;
+      const offset = args.offset ?? 0;
+      const limit = args.limit ?? 50;
+      memories = memories.slice(offset, offset + limit);
+      return { memories, total };
+    },
+  };
+}
+
+/**
+ * Score breakdown helper — recomputes the rerank components for a single
+ * memory without going through the Reranker (which only exposes the total).
+ *
+ * Mirrors lib/reranker.ts formula. If weights diverge (config drift),
+ * the breakdown still shows raw signals + their weighted contributions.
+ */
+export function computeScoreBreakdown(
+  memory: Memory,
+  weights: {
+    recency: number;
+    confidence: number;
+    reinforcements: number;
+    graph_distance: number;
+  },
+  source: "vector" | "graph" | "workflow_lookup" = "vector",
+  now: number = Date.now()
+): {
+  recency: number;
+  confidence: number;
+  reinforcements: number;
+  graphDistance: number;
+  total: number;
+} {
+  const ageDays = (now - memory.last_accessed) / (1000 * 60 * 60 * 24);
+  const recency = Math.exp(-ageDays / 30);
+  const confidence = memory.confidence;
+  const reinforcements = Math.min(memory.reinforcements / 10, 1);
+  const graphDistance = source === "graph" ? 0.5 : 1.0;
+  const total =
+    recency * weights.recency +
+    confidence * weights.confidence +
+    reinforcements * weights.reinforcements +
+    graphDistance * weights.graph_distance;
+  return { recency, confidence, reinforcements, graphDistance, total };
+}
+
+export function buildMemoryExplainTool(
+  store: MnemosyneStore,
+  weights: {
+    recency: number;
+    confidence: number;
+    reinforcements: number;
+    graph_distance: number;
+  }
+): CapabilityDefinition {
+  return {
+    name: "memory_explain",
+    description:
+      "Show the rerank score breakdown for a memory against a query. Returns { recency, confidence, reinforcements, graphDistance, total } — useful for debugging why a memory ranks high or low.",
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Memory id (full or short prefix)" },
+        query: { type: "string", description: "Query text to score against" },
+      },
+      required: ["id", "query"],
+    },
+    handler: async (raw) => {
+      const args = raw as unknown as MemoryExplainArgs;
+      if (!args.id || !args.query) {
+        return { error: "id and query are required" };
+      }
+      const mem = await resolveMemoryId(store, args.id);
+      if (!mem) return { error: "not found" };
+
+      // Probe Chroma for vector distance — purely informational, surfaces in
+      // the breakdown so callers can see the raw similarity signal alongside
+      // the weighted rerank components.
+      let vectorDistance: number | null = null;
+      try {
+        const layer = mem.promoted_at ? "long" : "short";
+        const hits = await store.chroma.query(layer, args.query, 50);
+        const hit = hits.find((h) => h.id === mem.id);
+        if (hit) vectorDistance = hit.distance;
+      } catch {
+        // Chroma unreachable — score breakdown still works without it
+      }
+
+      const breakdown = computeScoreBreakdown(mem, weights);
+      return {
+        id: mem.id,
+        title: mem.title,
+        vector_distance: vectorDistance,
+        vector_similarity:
+          vectorDistance !== null ? 1 - vectorDistance : null,
+        recency: breakdown.recency,
+        confidence: breakdown.confidence,
+        reinforcements: breakdown.reinforcements,
+        graphDistance: breakdown.graphDistance,
+        total: breakdown.total,
+        weights,
+      };
+    },
+  };
+}
