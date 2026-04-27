@@ -166,6 +166,25 @@ export class Neo4jAdapter {
     }
   }
 
+  /**
+   * Create a bidirectional CONTRADICTS edge between two memories. Used by the
+   * consolidator's conflict detector — both nodes stay in the graph (D6 keep-both)
+   * and the retriever surfaces the conflict at query time.
+   */
+  async createContradictsEdge(aId: string, bId: string): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(
+        `MATCH (a:Memory {id: $aId}), (b:Memory {id: $bId})
+         MERGE (a)-[r:CONTRADICTS {detected_at: $now}]->(b)
+         MERGE (b)-[r2:CONTRADICTS {detected_at: $now}]->(a)`,
+        { aId, bId, now: Date.now() }
+      );
+    } finally {
+      await s.close();
+    }
+  }
+
   private propsToMemory(props: any): Memory {
     return {
       id: props.id,
