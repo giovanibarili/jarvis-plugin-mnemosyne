@@ -1,0 +1,19 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: mnemosyne-neo4j
+    environment:
+      - NEO4J_AUTH=none
+      - NEO4J_server_default__listen__address=0.0.0.0
+      - NEO4J_server_default__advertised__address=127.0.0.1
+      - NEO4JLABS_PLUGINS=["apoc"]
+    ports:
+      - "127.0.0.1:7687:7687"
+      - "127.0.0.1:7474:7474"
+    volumes:
+      - ${HOME}/.jarvis/mnemosyne/neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p none 'RETURN 1' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
