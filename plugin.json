@@ -1,7 +1,7 @@
 {
   "name": "jarvis-plugin-mnemosyne",
   "version": "1.0.0",
-  "description": "Long-term memory plugin: hybrid vector+graph storage modeled on brain memory consolidation",
+  "description": "Long-term memory for JARVIS via hybrid Markdown + Vector + Graph storage with two-pass extraction and consolidation.",
   "author": "giovanibarili",
   "entry": "pieces/index.ts",
   "capabilities": {
