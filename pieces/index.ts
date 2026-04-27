@@ -1,7 +1,374 @@
 import type { PluginContext, Piece } from "@jarvis/core";
+import { EventBus } from "@jarvis/core";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { promises as fs } from "fs";
 
-export async function createPieces(ctx: PluginContext): Promise<Piece[]> {
-  // Preflight is added in Task 12
-  // For now just return empty array
-  return [];
+import { preflight, MnemosyneBootError } from "../lib/preflight.js";
+import { ChromaServer } from "../lib/chroma-server.js";
+import { ChromaAdapter } from "../lib/chroma-adapter.js";
+import { Neo4jServer } from "../lib/neo4j-server.js";
+import { Neo4jAdapter } from "../lib/neo4j-adapter.js";
+import { MarkdownStore } from "../lib/markdown-store.js";
+import { MnemosyneStore } from "../lib/store.js";
+import { Logger } from "../lib/logger.js";
+import { Extractor, type LLMClient } from "../lib/extractor.js";
+import { Reranker } from "../lib/reranker.js";
+import { ConflictDetector } from "../lib/conflict-detector.js";
+import { ReplayEngine } from "../lib/replay-engine.js";
+import { ObserverPiece } from "./observer.js";
+import { EncoderPiece } from "./encoder.js";
+import { RetrieverPiece } from "./retriever.js";
+import { ConsolidatorPiece } from "./consolidator.js";
+import { PanelPiece } from "./panel.js";
+
+// ESM equivalent of __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const DATA_DIR = `${process.env.HOME}/.jarvis/mnemosyne`;
+
+/**
+ * Plugin entry point.
+ *
+ * The @jarvis/core PluginContext expects `createPieces` to return `Piece[]`
+ * synchronously (the plugin loader does `for (const piece of pieces)` over
+ * the return value — a Promise would break iteration). All async setup
+ * (preflight, server boot, adapter connect, schema apply) is therefore
+ * kicked off as a background bootstrap promise that each piece's `start()`
+ * awaits before becoming functional.
+ */
+export function createPieces(ctx: PluginContext): Piece[] {
+  const bootstrap = bootstrapAsync(ctx);
+  // Guard against unhandled rejection while the pieces still wait for it
+  bootstrap.catch((err) => {
+    console.error("[mnemosyne] bootstrap failed:", err);
+  });
+
+  // Each piece is wrapped in a gate that awaits bootstrap before delegating
+  // to the real piece's start(). The wrapped piece exposes the same id/name
+  // so the HUD and capability registry behave identically.
+  return [
+    gatedPiece("mnemosyne-observer", "Mnemosyne Observer", bootstrap, (b) => b.observer),
+    gatedPiece("mnemosyne-encoder", "Mnemosyne Encoder", bootstrap, (b) => b.encoder),
+    gatedRetrieverPiece(bootstrap),
+    gatedPiece("mnemosyne-consolidator", "Mnemosyne Consolidator", bootstrap, (b) => b.consolidator),
+    gatedPiece("mnemosyne-panel", "Mnemosyne Panel", bootstrap, (b) => b.panel),
+  ];
+}
+
+/** Bootstrap result: every long-lived component built during async init. */
+interface Bootstrap {
+  observer: ObserverPiece;
+  encoder: EncoderPiece;
+  retriever: RetrieverPiece;
+  consolidator: ConsolidatorPiece;
+  panel: PanelPiece;
+  /** Cached most recent block per session for sync systemContext() */
+  retrieverCache: Map<string, string>;
+}
+
+async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
+  // 1. Preflight — fail loud (D13)
+  try {
+    await preflight();
+  } catch (e) {
+    if (e instanceof MnemosyneBootError) {
+      ctx.bus.publish({
+        channel: "hud.update",
+        source: "mnemosyne",
+        action: "add",
+        pieceId: "mnemosyne-preflight-error",
+        piece: {
+          pieceId: "mnemosyne-preflight-error",
+          type: "panel",
+          name: "Mnemosyne — boot failed",
+          status: "error",
+          data: { failures: e.failures },
+          ephemeral: true,
+          renderer: { plugin: "jarvis-plugin-mnemosyne", file: "PreflightErrorPanel" },
+        },
+      });
+    }
+    throw e;
+  }
+
+  // 2. Load (or seed) config
+  const configPath = join(DATA_DIR, "config.json");
+  const config = await loadOrCreateConfig(configPath);
+
+  // 3. Start Chroma server
+  const chromaServer = new ChromaServer({
+    dataDir: join(DATA_DIR, "chroma-data"),
+    port: config.chroma.port,
+  });
+  await chromaServer.start();
+
+  // 4. Start Neo4j container, validate loopback binding (D10)
+  const neo4jServer = new Neo4jServer({
+    composeFile: join(__dirname, "../docker/docker-compose.yml"),
+    containerName: config.neo4j.container_name,
+    boltUri: config.neo4j.bolt_uri,
+  });
+  await neo4jServer.start();
+
+  if (!(await neo4jServer.validateLoopbackBinding())) {
+    throw new Error(
+      "Neo4j ports not bound to 127.0.0.1 — refusing to start (security)"
+    );
+  }
+
+  // 5. Connect adapters
+  const chroma = new ChromaAdapter({
+    host: config.chroma.host,
+    port: config.chroma.port,
+    embeddingModel: config.chroma.embedding_model,
+  });
+  await chroma.init();
+
+  const neo4j = new Neo4jAdapter({ uri: config.neo4j.bolt_uri });
+  await neo4j.connect();
+  await neo4j.applySchema(join(__dirname, "../cypher/schema.cypher"));
+
+  const markdownStore = new MarkdownStore(DATA_DIR);
+  const logger = new Logger(DATA_DIR);
+  const store = new MnemosyneStore(markdownStore, chroma, neo4j, logger);
+
+  // 6. Build pipelines
+  const llm = makeLLMClient(ctx);
+  const extractor = new Extractor(
+    llm,
+    join(__dirname, "../prompts"),
+    config.encoder.min_confidence
+  );
+  const conflictDetector = new ConflictDetector(llm, chroma, neo4j, {
+    similarityThreshold: config.consolidator.conflict_similarity_threshold,
+    promptsDir: join(__dirname, "../prompts"),
+  });
+  const reranker = new Reranker(config.retriever.rerank_weights);
+  // ReplayEngine constructed for Task 13 tools to consume; not run in Task 12
+  const replayEngine = new ReplayEngine({ logger });
+
+  // 7. Construct pieces
+  const encoder = new EncoderPiece(extractor, store, logger);
+  const observer = new ObserverPiece((turn) => encoder.enqueue(turn));
+  const retriever = new RetrieverPiece(store, reranker, {
+    topK: config.retriever.top_k_vector,
+    graphHops: config.retriever.graph_hops,
+    workflowLookupEnabled: config.retriever.workflow_lookup_enabled,
+  });
+  const consolidator = new ConsolidatorPiece(store, conflictDetector, logger, {
+    cron: config.consolidator.cron,
+    skipIfActiveWithinMinutes: config.consolidator.skip_if_active_within_minutes,
+    promotionReinforcementsThreshold: config.consolidator.promotion_threshold_reinforcements,
+    promotionConfidenceThreshold: config.consolidator.promotion_threshold_confidence,
+    mergeSimilarityThreshold: config.consolidator.merge_similarity_threshold,
+    decay: config.decay,
+  });
+  const panel = new PanelPiece(store, neo4j, logger);
+
+  // 8. Cron registration (D12: 3am daily consolidation)
+  registerCron(ctx, config.consolidator.cron);
+
+  // 9. Tool registration — Task 13 fills this in
+  registerTools(ctx, store, neo4j, consolidator, replayEngine);
+
+  return {
+    observer,
+    encoder,
+    retriever,
+    consolidator,
+    panel,
+    retrieverCache: new Map(),
+  };
+}
+
+/**
+ * Generic gated wrapper: presents a stable Piece identity to the loader and
+ * defers start() to bootstrap completion + the real piece's start(). The
+ * underlying piece's systemContext (sync, no args) is delegated when present.
+ */
+function gatedPiece<P extends Piece>(
+  id: string,
+  name: string,
+  bootstrap: Promise<Bootstrap>,
+  pick: (b: Bootstrap) => P
+): Piece {
+  let real: P | undefined;
+  return {
+    id,
+    name,
+    async start(bus) {
+      const b = await bootstrap;
+      real = pick(b);
+      await real.start(bus);
+    },
+    async stop() {
+      if (real) await real.stop();
+    },
+    systemContext: () => real?.systemContext?.() ?? "",
+  };
+}
+
+/**
+ * Retriever needs its own gated wrapper because its real `systemContext`
+ * is async (Promise<string>) and takes a sessionId — the @jarvis/core
+ * `Piece.systemContext` is sync and takes no args. Per errata #18 we cache
+ * the last computed block per session and refresh asynchronously on cache
+ * miss. First call returns "" (no cached block); subsequent calls return
+ * fresh data.
+ *
+ * The retriever's own internal cache (keyed by lastUserMsg) handles the
+ * inner correctness; this wrapper just bridges the sync signature.
+ */
+function gatedRetrieverPiece(bootstrap: Promise<Bootstrap>): Piece {
+  let real: RetrieverPiece | undefined;
+  let bootstrapDone = false;
+  bootstrap
+    .then((b) => {
+      real = b.retriever;
+      bootstrapDone = true;
+    })
+    .catch(() => {
+      /* already logged */
+    });
+
+  return {
+    id: "mnemosyne-retriever",
+    name: "Mnemosyne Retriever",
+    async start(bus) {
+      const b = await bootstrap;
+      real = b.retriever;
+      bootstrapDone = true;
+      await real.start(bus);
+    },
+    async stop() {
+      if (real) await real.stop();
+    },
+    systemContext: () => {
+      if (!bootstrapDone || !real) return "";
+      const sid = "main";
+      // Fire-and-forget refresh; next sync call returns the fresh block
+      const cached = (real as unknown as { cache: Map<string, { lastUserMsg: string; block: string }> }).cache.get(sid);
+      const lastMsg = (real as unknown as { lastUserMsg: Map<string, string> }).lastUserMsg.get(sid);
+      if (cached?.lastUserMsg !== lastMsg) {
+        real.systemContext(sid).catch(() => {});
+      }
+      return cached?.block ?? "";
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ helpers */
+
+async function loadOrCreateConfig(configPath: string): Promise<any> {
+  try {
+    const raw = await fs.readFile(configPath, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    const defaultsPath = join(__dirname, "../config.default.json");
+    const defaults = JSON.parse(await fs.readFile(defaultsPath, "utf-8"));
+    await fs.mkdir(dirname(configPath), { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify(defaults, null, 2));
+    return defaults;
+  }
+}
+
+/**
+ * LLMClient bridge.
+ *
+ * The plan referenced a `ctx.bus.request` API for synchronous-style
+ * request/reply against the providerRouter, but @jarvis/core's EventBus
+ * exposes only `publish`/`subscribe`. Until a proper request/reply helper
+ * exists (or until Mnemosyne grows a dedicated `ai.invoke` channel with a
+ * reply listener), we use a publish-with-replyTo + subscribe-once pattern.
+ *
+ * For Task 12 the client is wired but never exercised — the Encoder runs
+ * the LLM lazily on incoming turns, and no turns flow until the plugin is
+ * actually loaded into a JARVIS runtime. Tasks 13-16 will exercise this.
+ */
+function makeLLMClient(ctx: PluginContext): LLMClient {
+  return {
+    async call({ system, user, maxTokens, model }) {
+      return new Promise<string>((resolve, reject) => {
+        const replyChannel = `mnemosyne-llm-${crypto.randomUUID()}`;
+        const timeout = setTimeout(() => {
+          unsubscribe();
+          reject(new Error(`LLM call timed out after 30s (model=${model ?? "default"})`));
+        }, 30_000);
+
+        const unsubscribe = ctx.bus.subscribe("ai.stream", (msg) => {
+          const m = msg as { event?: string; text?: string; replyTo?: string; error?: string };
+          if ((m as any).target !== replyChannel) return;
+          if (m.event === "complete") {
+            clearTimeout(timeout);
+            unsubscribe();
+            resolve(m.text ?? "");
+          } else if (m.event === "error") {
+            clearTimeout(timeout);
+            unsubscribe();
+            reject(new Error(m.error ?? "Unknown LLM error"));
+          }
+        });
+
+        ctx.bus.publish({
+          channel: "ai.request",
+          source: "mnemosyne-llm",
+          target: "providerRouter",
+          text: `${system}\n\n${user}`,
+          replyTo: replyChannel,
+          data: {
+            maxTokens: maxTokens ?? 800,
+            model: model ?? "claude-haiku-3-5",
+          },
+        });
+      });
+    },
+  };
+}
+
+/**
+ * Cron registration via the capability bus.
+ *
+ * The capability.request channel uses `{ calls: CapabilityCall[] }` shape
+ * (see @jarvis/core/types.ts), not the `{ capability, args }` shape the
+ * plan sketched. We construct a CapabilityCall envelope.
+ */
+function registerCron(ctx: PluginContext, cron: string): void {
+  ctx.bus.publish({
+    channel: "capability.request",
+    source: "mnemosyne",
+    calls: [
+      {
+        id: `mnemosyne-consolidator-cron-${Date.now()}`,
+        name: "cron_create",
+        input: {
+          cron,
+          target: "main",
+          prompt: "[mnemosyne-internal] consolidate",
+          recurring: true,
+        },
+      },
+    ],
+  });
+}
+
+/**
+ * Tool registration — Task 13 will register memory_search, memory_forget,
+ * memory_pin, workflow_list, workflow_replay, etc. against
+ * ctx.capabilityRegistry. Empty body for now so the plugin loads cleanly.
+ */
+function registerTools(
+  ctx: PluginContext,
+  store: MnemosyneStore,
+  neo4j: Neo4jAdapter,
+  consolidator: ConsolidatorPiece,
+  replay: ReplayEngine
+): void {
+  // TODO(Task 13): register Mnemosyne capabilities here
+  void ctx;
+  void store;
+  void neo4j;
+  void consolidator;
+  void replay;
 }

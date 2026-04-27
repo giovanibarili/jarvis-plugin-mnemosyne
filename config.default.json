@@ -1,0 +1,68 @@
+{
+  "encoder": {
+    "model": "claude-haiku-3-5",
+    "min_confidence": 0.6,
+    "categories_enabled": [
+      "code-pattern",
+      "preference",
+      "mental-model",
+      "architecture-decision",
+      "anti-pattern",
+      "workflow",
+      "glossary"
+    ],
+    "two_pass_enabled": true
+  },
+  "workflow_detection": {
+    "min_steps": 3,
+    "boundary": "user_turn",
+    "syntactic_detector_enabled": false
+  },
+  "retriever": {
+    "top_k_vector": 5,
+    "graph_hops": 1,
+    "rerank_weights": {
+      "recency": 0.25,
+      "confidence": 0.30,
+      "reinforcements": 0.25,
+      "graph_distance": 0.20
+    },
+    "workflow_lookup_enabled": true,
+    "default_visibility_filter": "open_or_same_session"
+  },
+  "consolidator": {
+    "cron": "0 3 * * *",
+    "skip_if_active_within_minutes": 15,
+    "promotion_threshold_reinforcements": 3,
+    "promotion_threshold_confidence": 0.9,
+    "merge_similarity_threshold": 0.85,
+    "conflict_similarity_threshold": 0.7
+  },
+  "decay": {
+    "score_threshold": 60,
+    "category_multipliers": {}
+  },
+  "neo4j": {
+    "bolt_uri": "bolt://127.0.0.1:7687",
+    "browser_uri": "http://127.0.0.1:7474",
+    "auth": "none",
+    "container_name": "mnemosyne-neo4j",
+    "image": "neo4j:5-community"
+  },
+  "chroma": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "embedding_model": "minilm",
+    "embedding_model_used_at_index_time": "minilm"
+  },
+  "privacy": {
+    "default_visibility": "open",
+    "exclude_sessions": [],
+    "exclude_categories": [],
+    "cross_session_retrieval": true
+  },
+  "workflow_replay": {
+    "confirm_each_step": true,
+    "auto_execute_safe_steps": false
+  }
+}
