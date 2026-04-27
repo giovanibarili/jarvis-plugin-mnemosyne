@@ -327,8 +327,9 @@ function makeLLMClient(ctx: PluginContext): LLMClient {
   return {
     async call({ system, user }) {
       const factory = ctx.sessionFactory;
+      const label = `mnemosyne-llm-${crypto.randomUUID().slice(0, 8)}`;
       const session = factory.createWithPrompt({
-        label: `mnemosyne-llm-${crypto.randomUUID().slice(0, 8)}`,
+        label,
         basePromptOverride: system,
       });
 
@@ -361,6 +362,18 @@ function makeLLMClient(ctx: PluginContext): LLMClient {
         return text;
       } finally {
         session.close();
+        // Notify metrics-hud (and any other subscriber) that this ephemeral
+        // session is gone — otherwise its bucket lingers forever in the
+        // scope dropdown. AnthropicMetrics keys buckets by the human-readable
+        // `label` (see AnthropicSession.streamFromAPI emitting
+        // `system.event api.anthropic.usage` with `sessionId: this.label`).
+        // We must echo the SAME label here for the eviction to match.
+        ctx.bus.publish({
+          channel: "system.event",
+          source: "mnemosyne-llm",
+          event: "session.closed",
+          data: { sessionId: label },
+        });
       }
     },
   };
