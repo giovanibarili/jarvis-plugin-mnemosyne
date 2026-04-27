@@ -17,6 +17,7 @@
 import MemoryCard from "./MemoryCard";
 import PreflightErrorPanel from "./PreflightErrorPanel";
 import WorkflowReplayDialog from "./WorkflowReplayDialog";
+import GraphTab from "./GraphTab";
 import type {
   Memory,
   PanelData,
@@ -26,6 +27,8 @@ import type {
 } from "./types";
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
+
+type ActiveTab = "list" | "graph";
 
 interface Props {
   state: {
@@ -82,6 +85,7 @@ export default function MnemosynePanel({ state }: Props) {
   }
 
   // ── Local UI state ───────────────────────────────────
+  const [activeTab, setActiveTab] = useState<ActiveTab>("list");
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [searchHits, setSearchHits] = useState<Memory[] | null>(null);
@@ -197,73 +201,111 @@ export default function MnemosynePanel({ state }: Props) {
           <span style={styles.statLong}>{stats.long}</span>
           <span style={styles.statHint}>long</span>
         </div>
-        <div style={styles.searchWrap}>
-          <input
-            type="text"
-            placeholder="🔍 search memories…"
-            value={search}
-            onChange={(e: any) => setSearch(e.target.value)}
-            style={styles.searchInput}
-          />
-          {searching ? <span style={styles.searchHint}>…</span> : null}
-        </div>
+        {activeTab === "list" ? (
+          <div style={styles.searchWrap}>
+            <input
+              type="text"
+              placeholder="🔍 search memories…"
+              value={search}
+              onChange={(e: any) => setSearch(e.target.value)}
+              style={styles.searchInput}
+            />
+            {searching ? <span style={styles.searchHint}>…</span> : null}
+          </div>
+        ) : (
+          <span style={styles.tabHint}>
+            graph view · click a node for details
+          </span>
+        )}
       </div>
 
-      <div style={styles.filterBar}>
-        <select
-          style={styles.select}
-          value={filterCategory}
-          onChange={(e: any) => setFilterCategory(e.target.value as FilterCategory)}
+      <div style={styles.tabBar}>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "list" ? styles.tabActive : {}),
+          }}
+          onClick={() => setActiveTab("list")}
         >
-          <option value="all">all categories</option>
-          {ALL_CATEGORIES.map((c) => (
-            <option key={c} value={c}>{c}</option>
-          ))}
-        </select>
-        <select
-          style={styles.select}
-          value={filterLayer}
-          onChange={(e: any) => setFilterLayer(e.target.value as FilterLayer)}
+          List
+        </button>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "graph" ? styles.tabActive : {}),
+          }}
+          onClick={() => setActiveTab("graph")}
         >
-          <option value="all">all layers</option>
-          <option value="short">short</option>
-          <option value="long">long</option>
-        </select>
-        <select
-          style={styles.select}
-          value={filterProject}
-          onChange={(e: any) => setFilterProject(e.target.value)}
-        >
-          {projects.map((p) => (
-            <option key={p} value={p}>{p === "all" ? "all projects" : `@${p}`}</option>
-          ))}
-        </select>
-        <span style={styles.filterCount}>
-          {filtered.length}/{memories.length} shown
-        </span>
+          Graph
+        </button>
       </div>
+
+      {activeTab === "list" ? (
+        <div style={styles.filterBar}>
+          <select
+            style={styles.select}
+            value={filterCategory}
+            onChange={(e: any) => setFilterCategory(e.target.value as FilterCategory)}
+          >
+            <option value="all">all categories</option>
+            {ALL_CATEGORIES.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          <select
+            style={styles.select}
+            value={filterLayer}
+            onChange={(e: any) => setFilterLayer(e.target.value as FilterLayer)}
+          >
+            <option value="all">all layers</option>
+            <option value="short">short</option>
+            <option value="long">long</option>
+          </select>
+          <select
+            style={styles.select}
+            value={filterProject}
+            onChange={(e: any) => setFilterProject(e.target.value)}
+          >
+            {projects.map((p) => (
+              <option key={p} value={p}>{p === "all" ? "all projects" : `@${p}`}</option>
+            ))}
+          </select>
+          <span style={styles.filterCount}>
+            {filtered.length}/{memories.length} shown
+          </span>
+        </div>
+      ) : null}
 
       <div style={styles.body}>
-        <div style={styles.list}>
-          {filtered.length === 0 ? (
-            <div style={styles.empty}>
-              {memories.length === 0
-                ? "No memories yet. Have a conversation with JARVIS — encoded memories appear here."
-                : "No memories match the current filters."}
-            </div>
-          ) : (
-            filtered.map((m) => (
-              <MemoryCard
-                key={m.id}
-                memory={m}
-                selected={m.id === selectedId}
-                onSelect={(id) => setSelectedId(id === selectedId ? null : id)}
-                onPin={handlePin}
-                onDelete={handleDelete}
-              />
-            ))
-          )}
-        </div>
+        {activeTab === "list" ? (
+          <div style={styles.list}>
+            {filtered.length === 0 ? (
+              <div style={styles.empty}>
+                {memories.length === 0
+                  ? "No memories yet. Have a conversation with JARVIS — encoded memories appear here."
+                  : "No memories match the current filters."}
+              </div>
+            ) : (
+              filtered.map((m) => (
+                <MemoryCard
+                  key={m.id}
+                  memory={m}
+                  selected={m.id === selectedId}
+                  onSelect={(id) => setSelectedId(id === selectedId ? null : id)}
+                  onPin={handlePin}
+                  onDelete={handleDelete}
+                />
+              ))
+            )}
+          </div>
+        ) : (
+          <GraphTab
+            memories={memories}
+            selectedId={selectedId}
+            onSelect={(id) => setSelectedId(id)}
+            projects={projects}
+          />
+        )}
 
         {selected ? (
           <div style={styles.detail}>
@@ -309,21 +351,29 @@ export default function MnemosynePanel({ state }: Props) {
       </div>
 
       <div style={styles.bottomBar}>
-        <button style={styles.actionBtn} onClick={handleConsolidate}>
-          ⚙ Consolidate now
-        </button>
-        <a
-          style={styles.actionLink}
-          href={`${PLUGIN_BASE}/scripts/rebuild-indexes`}
-          onClick={(e: any) => {
-            e.preventDefault();
-            void postJson(`${PLUGIN_BASE}/rebuild-indexes`).then((r) =>
-              flash(r?.ok === false ? `rebuild failed: ${r.error}` : "rebuild requested"),
-            );
-          }}
-        >
-          ↻ Rebuild indexes
-        </a>
+        {activeTab === "list" ? (
+          <>
+            <button style={styles.actionBtn} onClick={handleConsolidate}>
+              ⚙ Consolidate now
+            </button>
+            <a
+              style={styles.actionLink}
+              href={`${PLUGIN_BASE}/scripts/rebuild-indexes`}
+              onClick={(e: any) => {
+                e.preventDefault();
+                void postJson(`${PLUGIN_BASE}/rebuild-indexes`).then((r) =>
+                  flash(r?.ok === false ? `rebuild failed: ${r.error}` : "rebuild requested"),
+                );
+              }}
+            >
+              ↻ Rebuild indexes
+            </a>
+          </>
+        ) : (
+          <span style={styles.tabHint}>
+            bolt://127.0.0.1:7687 · live graph · D9
+          </span>
+        )}
         {data.error ? (
           <span style={styles.errorBanner}>error: {data.error}</span>
         ) : null}
@@ -381,6 +431,38 @@ const styles: Record<string, any> = {
     outline: "none",
   },
   searchHint: { fontSize: "12px", color: "#888" },
+  tabHint: {
+    fontSize: "11px",
+    color: "#666",
+    fontStyle: "italic",
+    marginLeft: "auto",
+  },
+
+  tabBar: {
+    display: "flex",
+    gap: "0",
+    padding: "0 12px",
+    borderBottom: "1px solid #1f1f1f",
+    backgroundColor: "#0c0c0c",
+  },
+  tab: {
+    padding: "6px 14px",
+    border: "none",
+    borderBottom: "2px solid transparent",
+    backgroundColor: "transparent",
+    color: "#888",
+    cursor: "pointer",
+    fontSize: "12px",
+    fontFamily: "inherit",
+    fontWeight: 600,
+    outline: "none",
+    textTransform: "uppercase",
+    letterSpacing: "0.04em",
+  },
+  tabActive: {
+    color: "#fff",
+    borderBottom: "2px solid #8b5cf6",
+  },
 
   filterBar: {
     display: "flex",
