@@ -85,7 +85,9 @@ export function createPieces(ctx: PluginContext): Piece[] {
   // retriever.systemContext(sessionId) which bumps `reinforcements` for every
   // hit that lands in the block.
   if (typeof ctx.registerContextInjector === "function") {
+    const SESSION_FILTER = /^actor-mnemo/;
     ctx.registerContextInjector((sessionId: string): string[] => {
+      if (!SESSION_FILTER.test(sessionId)) return []; // only inject into actor-mnemo* sessions
       const ready = retrieverHandle.real;
       if (!ready) return []; // bootstrap not done yet — opt out
 
