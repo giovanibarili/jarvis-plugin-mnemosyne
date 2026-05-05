@@ -1,5 +1,5 @@
 import type { PluginContext, Piece } from "@jarvis/core";
-import { EventBus, type InjectedContext } from "@jarvis/core";
+import { EventBus } from "@jarvis/core";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
@@ -85,7 +85,7 @@ export function createPieces(ctx: PluginContext): Piece[] {
   // retriever.systemContext(sessionId) which bumps `reinforcements` for every
   // hit that lands in the block.
   if (typeof ctx.registerContextInjector === "function") {
-    ctx.registerContextInjector((sessionId: string): InjectedContext[] => {
+    ctx.registerContextInjector((sessionId: string): string[] => {
       const ready = retrieverHandle.real;
       if (!ready) return []; // bootstrap not done yet — opt out
 
@@ -111,11 +111,7 @@ export function createPieces(ctx: PluginContext): Piece[] {
       const block = cached?.block ?? "";
       if (!block) return [];
 
-      return [{
-        role: "user",
-        content: block,
-        cache_control: { type: "ephemeral" },
-      }];
+      return [block];
     });
   }
 
