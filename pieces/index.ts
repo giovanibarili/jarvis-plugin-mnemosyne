@@ -113,7 +113,17 @@ export function createPieces(ctx: PluginContext): Piece[] {
       const block = cached?.block ?? "";
       if (!block) return [];
 
-      return [block];
+      // Wrap in <system-reminder> so the model treats this as background
+      // context rather than user-authored content. Anthropic recognizes
+      // this tag natively and adjusts tone accordingly — no risk of the
+      // model citing memories verbatim or treating them as instructions.
+      const wrapped = `<system-reminder>
+The following memories were retrieved by Mnemosyne based on the current conversation context. Use them as background knowledge — past decisions, preferences, and patterns from previous sessions. Do not cite them verbatim unless directly relevant to the current task.
+
+${block}
+</system-reminder>`;
+
+      return [wrapped];
     });
   }
 
