@@ -1,5 +1,5 @@
 import type { PluginContext, Piece } from "@jarvis/core";
-import { EventBus } from "@jarvis/core";
+import { EventBus, type InjectedContext } from "@jarvis/core";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
@@ -61,11 +61,63 @@ const DATA_DIR = `${process.env.HOME}/.jarvis/mnemosyne`;
  * awaits before becoming functional.
  */
 export function createPieces(ctx: PluginContext): Piece[] {
+  // Shared handle so `createPieces` can register the context injector before
+  // bootstrap resolves, while still letting `gatedRetrieverPiece` populate
+  // `real` once bootstrap completes. The injector is registered eagerly with
+  // the core; until `real` is set, it contributes nothing (returns []).
+  const retrieverHandle: { real: RetrieverPiece | undefined } = { real: undefined };
+
   const bootstrap = bootstrapAsync(ctx);
   // Guard against unhandled rejection while the pieces still wait for it
   bootstrap.catch((err) => {
     console.error("[mnemosyne] bootstrap failed:", err);
   });
+  bootstrap.then((b) => { retrieverHandle.real = b.retriever; }).catch(() => { /* logged */ });
+
+  // Cache-friendly memory injection (since 0.4.0):
+  // Instead of injecting via Piece.systemContext (which goes into the system
+  // prompt array and INVALIDATES PROMPT CACHE every turn since the block
+  // mutates), we register a ContextInjector with the core. The core inserts
+  // our block as an ephemeral user message right BEFORE the user's actual
+  // prompt — preserving cache for the (large, stable) system prompt.
+  //
+  // Reinforcement-on-retrieval (D2) still happens here: the injector calls
+  // retriever.systemContext(sessionId) which bumps `reinforcements` for every
+  // hit that lands in the block.
+  if (typeof ctx.registerContextInjector === "function") {
+    ctx.registerContextInjector((sessionId: string): InjectedContext[] => {
+      const ready = retrieverHandle.real;
+      if (!ready) return []; // bootstrap not done yet — opt out
+
+      // Synchronous cache lookup — never await on the hot path.
+      // The retriever maintains per-session caches (cache, lastUserMsg)
+      // that we read directly. Type assertion bridges the private fields.
+      type Cache = Map<string, { lastUserMsg: string; block: string }>;
+      type LastMsg = Map<string, string>;
+      const cache = (ready as unknown as { cache: Cache }).cache;
+      const lastMsgMap = (ready as unknown as { lastUserMsg: LastMsg }).lastUserMsg;
+      const cached = cache.get(sessionId);
+      const lastMsg = lastMsgMap.get(sessionId);
+
+      // No user message observed yet on this session — nothing to retrieve.
+      if (!lastMsg) return [];
+
+      // Cache miss (first or stale): fire-and-forget refresh.
+      // We return the CURRENT cached block this turn; next turn picks up fresh.
+      if (cached?.lastUserMsg !== lastMsg) {
+        ready.systemContext(sessionId).catch(() => { /* logged inside */ });
+      }
+
+      const block = cached?.block ?? "";
+      if (!block) return [];
+
+      return [{
+        role: "user",
+        content: block,
+        cache_control: { type: "ephemeral" },
+      }];
+    });
+  }
 
   // Each piece is wrapped in a gate that awaits bootstrap before delegating
   // to the real piece's start(). The wrapped piece exposes the same id/name
@@ -73,7 +125,7 @@ export function createPieces(ctx: PluginContext): Piece[] {
   return [
     gatedPiece("mnemosyne-observer", "Mnemosyne Observer", bootstrap, (b) => b.observer),
     gatedPiece("mnemosyne-encoder", "Mnemosyne Encoder", bootstrap, (b) => b.encoder),
-    gatedRetrieverPiece(bootstrap),
+    gatedRetrieverPiece(bootstrap, retrieverHandle),
     gatedPiece("mnemosyne-consolidator", "Mnemosyne Consolidator", bootstrap, (b) => b.consolidator),
     gatedPiece("mnemosyne-panel", "Mnemosyne Panel", bootstrap, (b) => b.panel),
   ];
@@ -243,41 +295,33 @@ function gatedPiece<P extends Piece>(
  * The retriever's own internal cache (keyed by lastUserMsg) handles the
  * inner correctness; this wrapper just bridges the sync signature.
  */
-function gatedRetrieverPiece(bootstrap: Promise<Bootstrap>): Piece {
-  let real: RetrieverPiece | undefined;
-  let bootstrapDone = false;
-  bootstrap
-    .then((b) => {
-      real = b.retriever;
-      bootstrapDone = true;
-    })
-    .catch(() => {
-      /* already logged */
-    });
-
+/**
+ * Retriever piece wrapper. As of 0.4.0 the retriever no longer contributes
+ * to the system prompt via `systemContext` — that path invalidated prompt
+ * cache because the memory block mutates between turns. Memory injection
+ * now happens through `ctx.registerContextInjector` (registered up in
+ * `createPieces`), which inserts the block as an ephemeral user message
+ * with `cache_control: ephemeral` — preserving cache for the system prompt.
+ *
+ * This wrapper just gates start()/stop() on bootstrap and keeps the shared
+ * `handle.real` populated so the injector closure can reach the live retriever.
+ */
+function gatedRetrieverPiece(
+  bootstrap: Promise<Bootstrap>,
+  handle: { real: RetrieverPiece | undefined }
+): Piece {
   return {
     id: "mnemosyne-retriever",
     name: "Mnemosyne Retriever",
     async start(bus) {
       const b = await bootstrap;
-      real = b.retriever;
-      bootstrapDone = true;
-      await real.start(bus);
+      handle.real = b.retriever;
+      await b.retriever.start(bus);
     },
     async stop() {
-      if (real) await real.stop();
+      if (handle.real) await handle.real.stop();
     },
-    systemContext: () => {
-      if (!bootstrapDone || !real) return "";
-      const sid = "main";
-      // Fire-and-forget refresh; next sync call returns the fresh block
-      const cached = (real as unknown as { cache: Map<string, { lastUserMsg: string; block: string }> }).cache.get(sid);
-      const lastMsg = (real as unknown as { lastUserMsg: Map<string, string> }).lastUserMsg.get(sid);
-      if (cached?.lastUserMsg !== lastMsg) {
-        real.systemContext(sid).catch(() => {});
-      }
-      return cached?.block ?? "";
-    },
+    // Intentionally NO systemContext: memory injection moved to context injector.
   };
 }
 
