@@ -15,6 +15,7 @@ import { Logger } from "../lib/logger.js";
 import { Extractor, type LLMClient } from "../lib/extractor.js";
 import { Reranker } from "../lib/reranker.js";
 import { ConflictDetector } from "../lib/conflict-detector.js";
+import { SemanticRelationLinker } from "../lib/semantic-relation-linker.js";
 import { ReplayEngine } from "../lib/replay-engine.js";
 import { ObserverPiece } from "./observer.js";
 import { EncoderPiece } from "./encoder.js";
@@ -85,33 +86,103 @@ export function createPieces(ctx: PluginContext): Piece[] {
   // retriever.systemContext(sessionId) which bumps `reinforcements` for every
   // hit that lands in the block.
   if (typeof ctx.registerContextInjector === "function") {
-    const SESSION_FILTER = /^actor-mnemo/;
-    ctx.registerContextInjector((sessionId: string): string[] => {
-      if (!SESSION_FILTER.test(sessionId)) return []; // only inject into actor-mnemo* sessions
+    const SESSION_EXCLUDE = /^actor-(rag|worker|delegate)-|mnemosyne-skip/;
+    // Per-session tracking:
+    //   lastInjectedBlock  — the block we last injected into the context for this session.
+    //                        If the new block is identical we skip injection entirely
+    //                        (the model already has it in its context window from the
+    //                        previous turn's ephemeral block — re-injecting is noise).
+    //   lastNotifiedBlock  — same dedup for the timeline notification (subset of above,
+    //                        kept separate so we can notify independently if needed later).
+    const lastInjectedBlock = new Map<string, string>();
+    const lastNotifiedBlock = new Map<string, string>();
+
+    // When the context is compacted (Engine A or B), the conversation history is
+    // replaced and the previous memory block is gone — reset so we reinject on the
+    // next turn.
+    ctx.bus.subscribe("ai.stream", (msg: any) => {
+      if (msg.event === "compaction" || msg.event === "compaction_start") {
+        const sid = msg.target ?? "main";
+        lastInjectedBlock.delete(sid);
+        lastNotifiedBlock.delete(sid);
+      }
+    });
+    ctx.registerContextInjector(async (sessionId: string): Promise<string[]> => {
+      if (SESSION_EXCLUDE.test(sessionId)) return []; // skip ephemeral workers
       const ready = retrieverHandle.real;
       if (!ready) return []; // bootstrap not done yet — opt out
 
-      // Synchronous cache lookup — never await on the hot path.
-      // The retriever maintains per-session caches (cache, lastUserMsg)
-      // that we read directly. Type assertion bridges the private fields.
       type Cache = Map<string, { lastUserMsg: string; block: string }>;
       type LastMsg = Map<string, string>;
+      type PendingMap = Map<string, Promise<string>>;
       const cache = (ready as unknown as { cache: Cache }).cache;
       const lastMsgMap = (ready as unknown as { lastUserMsg: LastMsg }).lastUserMsg;
-      const cached = cache.get(sessionId);
+      const pendingMap = (ready as unknown as { pendingFetch: PendingMap }).pendingFetch;
       const lastMsg = lastMsgMap.get(sessionId);
 
       // No user message observed yet on this session — nothing to retrieve.
       if (!lastMsg) return [];
 
-      // Cache miss (first or stale): fire-and-forget refresh.
-      // We return the CURRENT cached block this turn; next turn picks up fresh.
+      const cached = cache.get(sessionId);
+
+      // If there's an in-flight fetch for this session (kicked off by the
+      // ai.request subscriber), await it with a 800ms safety timeout so
+      // we inject fresh data on the SAME turn rather than always lagging.
       if (cached?.lastUserMsg !== lastMsg) {
-        ready.systemContext(sessionId).catch(() => { /* logged inside */ });
+        const pending = pendingMap.get(sessionId);
+        if (pending) {
+          try {
+            await Promise.race([
+              pending,
+              new Promise<void>((_, rej) => setTimeout(() => rej(new Error("timeout")), 800)),
+            ]);
+          } catch {
+            // Timeout or error — fall through to whatever cache has now
+          }
+        }
       }
 
-      const block = cached?.block ?? "";
+      // Re-read cache after potential await
+      const freshCached = cache.get(sessionId);
+      const block = freshCached?.block ?? "";
+      // Record every injection attempt so the HUD can show success rate.
+      // We count both empty (no block) and successful injections, so the
+      // ratio injectionsWithBlock/injections gives the "useful injection"
+      // gauge directly.
+      ready.recordInjection(!!block);
       if (!block) return [];
+
+      // Skip injection if the block is identical to what was last injected for
+      // this session — the model already has it in its context window from the
+      // previous turn's ephemeral block, so re-sending is pure noise and wastes
+      // a cache breakpoint.
+      if (block === lastInjectedBlock.get(sessionId)) return [];
+      lastInjectedBlock.set(sessionId, block);
+
+      // Surface the injection in the chat timeline only when the injected
+      // block actually changed — same memories on consecutive turns stay silent.
+      if (ctx.addChatTimelineEntry && block !== lastNotifiedBlock.get(sessionId)) {
+        lastNotifiedBlock.set(sessionId, block);
+        const lastHitsMap = (ready as unknown as { lastHits: Map<string, unknown[]> }).lastHits;
+        const lastHits = lastHitsMap?.get(sessionId) as Array<{ memory: { id: string; category: string; title: string; confidence: number; reinforcements: number } }> | undefined;
+        const memories = lastHits
+          ? lastHits.map((h) => ({
+              id: h.memory.id,
+              category: h.memory.category,
+              title: h.memory.title,
+              confidence: h.memory.confidence,
+              reinforcements: h.memory.reinforcements,
+            }))
+          : [];
+        const count = memories.length || block.split("\n").filter((l) => l.startsWith("**[")).length;
+        const label = count === 1 ? "1 memory" : `${count} memories`;
+        ctx.addChatTimelineEntry(sessionId, {
+          text: `🧠 Mnemosyne — injected ${label}`,
+          rendererKind: "mnemosyne-memory-injection",
+          renderer: { plugin: "jarvis-plugin-mnemosyne", file: "MemoryInjectionEntry" },
+          payload: { count, memories },
+        });
+      }
 
       // Wrap in <system-reminder> so the model treats this as background
       // context rather than user-authored content. Anthropic recognizes
@@ -223,8 +294,15 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     join(__dirname, "../prompts"),
     config.encoder.min_confidence
   );
+  // Discover already-authored dynamic categories so the triage prompt lists them.
+  await extractor.init();
   const conflictDetector = new ConflictDetector(llm, chroma, neo4j, {
     similarityThreshold: config.consolidator.conflict_similarity_threshold,
+    promptsDir: join(__dirname, "../prompts"),
+  });
+  const relationLinker = new SemanticRelationLinker(llm, chroma, neo4j, {
+    similarityThreshold: config.encoder.relation_similarity_threshold ?? 0.82,
+    topK: config.encoder.relation_top_k ?? 8,
     promptsDir: join(__dirname, "../prompts"),
   });
   const reranker = new Reranker(config.retriever.rerank_weights);
@@ -232,13 +310,16 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   const replayEngine = new ReplayEngine({ logger });
 
   // 7. Construct pieces
-  const encoder = new EncoderPiece(extractor, store, logger);
-  const observer = new ObserverPiece((turn) => encoder.enqueue(turn));
+  const encoder = new EncoderPiece(extractor, store, logger, relationLinker);
+  const observer = new ObserverPiece(
+    (turn) => encoder.enqueue(turn),
+    config.encoder.context_window_size ?? 10
+  );
   const retriever = new RetrieverPiece(store, reranker, {
     topK: config.retriever.top_k_vector,
     graphHops: config.retriever.graph_hops,
     workflowLookupEnabled: config.retriever.workflow_lookup_enabled,
-  });
+  }, relationLinker);
   const consolidator = new ConsolidatorPiece(store, conflictDetector, logger, {
     cron: config.consolidator.cron,
     skipIfActiveWithinMinutes: config.consolidator.skip_if_active_within_minutes,
@@ -248,12 +329,21 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     decay: config.decay,
   });
   const panel = new PanelPiece(store, neo4j, logger);
+  // Late binding: the panel needs encoder + retriever for live stats. Both
+  // were created above in this same bootstrap function; safe to wire now.
+  panel.setStatsSources(encoder, retriever);
 
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
 
   // 9. Tool registration (Task 13)
   registerTools(ctx, store, neo4j, consolidator, replayEngine, config.retriever.rerank_weights);
+
+  // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
+  // The renderer fetches POST /plugins/jarvis-plugin-mnemosyne/{forget,pin,consolidate}.
+  // Without these the trash / pin buttons silently 404. We register thin
+  // wrappers that share the same handlers as the assistant-facing tools.
+  registerHttpRoutes(ctx, store, consolidator, panel);
 
   return {
     observer,
@@ -263,6 +353,107 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     panel,
     retrieverCache: new Map(),
   };
+}
+
+/**
+ * Tiny helper to read a JSON body off the incoming request. Returns `null`
+ * if the body is empty or not parseable — callers must handle that.
+ */
+function readJsonBody(req: any): Promise<any> {
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      if (!raw) return resolve(null);
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        resolve(null);
+      }
+    });
+    req.on("error", () => resolve(null));
+  });
+}
+
+function jsonResponse(res: any, status: number, body: unknown): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+/**
+ * Wire up the HUD-facing HTTP routes. These are intentionally one-liners that
+ * delegate to the same store/consolidator surface the assistant-facing tools
+ * use, so behaviour stays consistent across both entry points.
+ *
+ * Routes (all POST):
+ *   /plugins/jarvis-plugin-mnemosyne/forget         { id }
+ *   /plugins/jarvis-plugin-mnemosyne/pin            { id, pinned }
+ *   /plugins/jarvis-plugin-mnemosyne/consolidate    (no body)
+ *   /plugins/jarvis-plugin-mnemosyne/rebuild-indexes (no body — currently 501)
+ */
+function registerHttpRoutes(
+  ctx: PluginContext,
+  store: MnemosyneStore,
+  consolidator: ConsolidatorPiece,
+  panel: PanelPiece
+): void {
+  const base = "/plugins/jarvis-plugin-mnemosyne";
+
+  ctx.registerRoute("POST", `${base}/forget`, async (req: any, res: any) => {
+    try {
+      const body = await readJsonBody(req);
+      const id = typeof body?.id === "string" ? body.id : null;
+      if (!id) return jsonResponse(res, 400, { ok: false, error: "missing 'id'" });
+      const mem = await store.markdownStore.read(id).catch(() => null);
+      if (!mem) return jsonResponse(res, 404, { ok: false, error: "not found" });
+      await store.delete(id);
+      // Force the panel to refresh so the UI reflects the deletion immediately.
+      void panel.refreshNow().catch(() => {});
+      jsonResponse(res, 200, { ok: true, id });
+    } catch (e: any) {
+      jsonResponse(res, 500, { ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  ctx.registerRoute("POST", `${base}/pin`, async (req: any, res: any) => {
+    try {
+      const body = await readJsonBody(req);
+      const id = typeof body?.id === "string" ? body.id : null;
+      const pinned = body?.pinned === true;
+      if (!id) return jsonResponse(res, 400, { ok: false, error: "missing 'id'" });
+      const mem = await store.markdownStore.read(id).catch(() => null);
+      if (!mem) return jsonResponse(res, 404, { ok: false, error: "not found" });
+      if (Boolean(mem.pinned) === pinned) {
+        return jsonResponse(res, 200, { ok: true, id, no_op: true });
+      }
+      await store.write({ ...mem, pinned });
+      void panel.refreshNow().catch(() => {});
+      jsonResponse(res, 200, { ok: true, id, pinned });
+    } catch (e: any) {
+      jsonResponse(res, 500, { ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  ctx.registerRoute("POST", `${base}/consolidate`, async (_req: any, res: any) => {
+    try {
+      const stats = await consolidator.run();
+      void panel.refreshNow().catch(() => {});
+      jsonResponse(res, 200, { ok: true, stats });
+    } catch (e: any) {
+      jsonResponse(res, 500, { ok: false, error: String(e?.message ?? e) });
+    }
+  });
+
+  ctx.registerRoute("POST", `${base}/rebuild-indexes`, (_req: any, res: any) => {
+    // Index rebuild is a long-running script (scripts/rebuild-indexes.ts).
+    // Surfacing it through the HUD requires a job-runner we don't have yet,
+    // so we return a clear 501 instead of pretending to start the work.
+    jsonResponse(res, 501, {
+      ok: false,
+      error: "rebuild-indexes is not available via HUD. Run scripts/rebuild-indexes.ts manually.",
+    });
+  });
 }
 
 /**

@@ -2,6 +2,7 @@ import type { EventBus, AIRequestMessage } from "@jarvis/core";
 import type { MnemosyneStore } from "../lib/store";
 import type { Reranker } from "../lib/reranker";
 import type { RetrievalHit } from "../lib/types";
+import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
 
 export interface RetrieverOptions {
   topK: number;
@@ -36,21 +37,82 @@ export class RetrieverPiece {
   readonly name = "Mnemosyne Retriever";
 
   // Per-session caches. Both maps are keyed by sessionId.
-  //   lastUserMsg: most recent user prompt observed on ai.request
-  //   cache:        formatted block keyed by the user message that produced it
+  //   lastUserMsg:   most recent user prompt observed on ai.request
+  //   cache:         formatted block keyed by the user message that produced it
+  //   pendingFetch:  in-flight systemContext() Promise for the current turn —
+  //                  the injector awaits this with a timeout so it always gets
+  //                  fresh data on the same turn the ai.request arrived.
   private lastUserMsg = new Map<string, string>();
   private cache = new Map<string, { lastUserMsg: string; block: string }>();
+  /** In-flight fetch per session — awaited by the injector with timeout. */
+  pendingFetch = new Map<string, Promise<string>>();
+  /** Last retrieval hits per session — read by the context injector for timeline payload. */
+  lastHits = new Map<string, RetrievalHit[]>();
+
+
+  // ── Session-scoped retrieval stats (zeroed on boot).
+  // `retrievals` counts every distinct user-message lookup (cache miss).
+  // `retrievalsWithHits` is the subset that produced ≥1 surviving hit
+  // post-rerank — the rate of retrievals/with-hits is the "useful retrieval"
+  // signal. `reinforcements` mirrors store.incrementReinforcements calls
+  // because that's where retrieval converts into long-term salience. Hits
+  // total feeds the avg-hits-per-retrieval gauge.
+  private _stats = {
+    retrievals: 0,
+    retrievalsWithHits: 0,
+    cacheHits: 0,
+    hitsTotal: 0,
+    reinforcements: 0,
+    injections: 0,
+    injectionsWithBlock: 0,
+  };
+
+  getStats() {
+    return {
+      ...this._stats,
+      avgHits: this._stats.retrievals > 0
+        ? this._stats.hitsTotal / this._stats.retrievals
+        : 0,
+      sessionsTracked: this.lastUserMsg.size,
+    };
+  }
+
+  /** Called by the ContextInjector wrapper in pieces/index.ts on every
+   *  injection attempt. We split "called at all" from "produced a non-empty
+   *  block" so the HUD can show the injection success rate. */
+  recordInjection(producedBlock: boolean): void {
+    this._stats.injections++;
+    if (producedBlock) this._stats.injectionsWithBlock++;
+  }
 
   constructor(
     private store: MnemosyneStore,
     private reranker: Reranker,
-    private opts: RetrieverOptions
+    private opts: RetrieverOptions,
+    private relationLinker?: SemanticRelationLinker,
   ) {}
 
+  private _started = false;
   async start(bus: EventBus): Promise<void> {
+    if (this._started) return; // guard against double-start (hot reload, etc.)
+    this._started = true;
     bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
       const sid = msg.target ?? "main";
-      this.lastUserMsg.set(sid, msg.text ?? "");
+      const text = msg.text ?? "";
+      this.lastUserMsg.set(sid, text);
+
+      // Kick off retrieval immediately on ai.request so the cache is warm
+      // by the time sendAndStream calls contextInjector. The injector reads
+      // pendingFetch[sid] and awaits it (with timeout) — no more turn-1 miss.
+      const cached = this.cache.get(sid);
+      if (cached?.lastUserMsg !== text) {
+        const p = this.systemContext(sid);
+        this.pendingFetch.set(sid, p);
+        p.finally(() => {
+          // Only clear if this is still the active pending fetch for this sid.
+          if (this.pendingFetch.get(sid) === p) this.pendingFetch.delete(sid);
+        });
+      }
     });
   }
 
@@ -73,23 +135,59 @@ export class RetrieverPiece {
     if (!lastMsg) return "";
 
     const cached = this.cache.get(sid);
-    if (cached?.lastUserMsg === lastMsg) return cached.block;
+    if (cached?.lastUserMsg === lastMsg) {
+      this._stats.cacheHits++;
+      return cached.block;
+    }
 
+    this._stats.retrievals++;
     const hits = await this.retrieve(lastMsg, sid);
+    this._stats.hitsTotal += hits.length;
+    if (hits.length > 0) this._stats.retrievalsWithHits++;
+
     const block = this.format(hits);
     this.cache.set(sid, { lastUserMsg: lastMsg, block });
+    this.lastHits.set(sid, hits); // expose for injector timeline payload
 
     // Increment reinforcements on retrieved memories (D2: retrieval-only signal).
     // Best-effort — we do not want a Neo4j hiccup to break prompt construction.
     for (const hit of hits) {
       try {
         await this.store.incrementReinforcements(hit.memory.id);
+        this._stats.reinforcements++;
       } catch {
         // swallow — reinforcement is observability, not correctness
       }
     }
 
+    // Pass 3 — Semantic relation linking at retrieval time.
+    // When 2+ memories co-appear in the same retrieval context they share
+    // implicit semantic proximity. Link them pairwise so the graph captures
+    // this co-retrieval signal. Fire-and-forget: never blocks the injector.
+    if (this.relationLinker && hits.length >= 2) {
+      this.linkCoRetrievedMemories(hits).catch((err) => {
+        console.error("[mnemosyne] co-retrieval relation linking failed:", err);
+      });
+    }
+
     return block;
+  }
+
+  /**
+   * Link co-retrieved memories pairwise via RELATES_TO edges.
+   * Only links pairs where the linker's judge returns a non-"unrelated" verdict.
+   * Pairs already linked (MERGE semantics in Neo4j) are silently skipped.
+   */
+  private async linkCoRetrievedMemories(hits: RetrievalHit[]): Promise<void> {
+    if (!this.relationLinker) return;
+    // For each hit, run linkRelations — the linker queries Chroma for
+    // neighbours and will naturally find the other co-retrieved memories
+    // since they are all in the store with embeddings.
+    // We only trigger for vector-sourced hits (graph hops already have edges).
+    const vectorHits = hits.filter((h) => h.source === "vector");
+    for (const hit of vectorHits) {
+      await this.relationLinker.linkRelations(hit.memory);
+    }
   }
 
   private async retrieve(query: string, sessionId: string): Promise<RetrievalHit[]> {

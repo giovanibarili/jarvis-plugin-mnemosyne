@@ -102,11 +102,45 @@ graph TD
    in any layer rolls back.
 3. **Retrieve** — Vector top-k + 1-hop graph expansion → Reranker
    (recency/confidence/reinforcements/graph-distance) → privacy filter →
-   Block 1 injection.
+   ephemeral context injection (see [Injection architecture](#injection-architecture)).
 4. **Consolidate** — Nightly cron (3am): promote short→long on threshold,
    merge near-duplicates, detect conflicts via judge LLM, apply decay.
 5. **Replay** — Workflow replays load Step graph and execute with
    per-step confirmation.
+
+### Injection architecture
+
+Memories are injected as an **ephemeral user-message block** (`cache_control: ephemeral`)
+prepended to the user's prompt — not in the system prompt. This preserves Anthropic prompt
+cache across turns (the stable system prompt never mutates) while still grounding every
+response with the most relevant context.
+
+**Two-phase async injection (since v1.1):**
+
+```
+ai.request received
+  → Retriever subscriber: lastUserMsg[sid] = text
+                          pendingFetch[sid]  = systemContext(sid)   ← async DB fetch starts
+
+sendAndStream called
+  → await contextInjector(sid)
+      → injector awaits pendingFetch[sid] with 800ms safety timeout
+      → cache populated → returns [<system-reminder>…</system-reminder>]
+  → memoryBlock prepended to user message as ephemeral block
+  → API call
+```
+
+**Deduplication:** the injector tracks `lastInjectedBlock` per session. If the retrieved
+block is identical to the previous turn's block, injection is skipped entirely (the model
+already has it in context from the previous turn). Re-injection happens when memories change
+or after compaction (which wipes context history).
+
+**Actor sessions:** `actor-runner` publishes `ai.request` before calling `sendAndStream` so
+the retriever's subscriber primes `pendingFetch` before the injector runs.
+
+**Core changes required:** `ContextInjectorFn` in `@jarvis/core` returns
+`Promise<string[]>`, `sendAndStream` awaits it, and the PluginManager aggregator uses
+`Promise.allSettled` to await injectors in parallel.
 
 ### Bus channels
 - `mnemosyne.observation` — raw turn events from Observer to Encoder
@@ -260,7 +294,8 @@ Full version sequencing in
 
 | Version | Focus |
 |---|---|
-| **v1.0 (current)** | Full-stack MVP — extract, store, retrieve, consolidate, replay |
+| **v1.0** | Full-stack MVP — extract, store, retrieve, consolidate, replay |
+| **v1.1 (current)** | Sync first-turn injection — pendingFetch pattern, async `ContextInjectorFn`, dedup by block hash, compaction reset |
 | v1.1 | Anti-hallucination layer — provenance, citation enforcement |
 | v1.2 | Query intelligence — semantic query rewrite, intent classification |
 | v1.3 | Adaptive retrieval — learned rerank weights per query class |
