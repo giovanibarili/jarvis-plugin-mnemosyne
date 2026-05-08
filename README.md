@@ -49,6 +49,9 @@ sequenceDiagram
 ```bash
 # From within JARVIS
 plugin_install github.com/giovanibarili/jarvis-plugin-mnemosyne
+
+# or clone manually
+git clone https://github.com/giovanibarili/jarvis-plugin-mnemosyne ~/.jarvis/plugins/jarvis-plugin-mnemosyne
 ```
 
 The plugin auto-runs `scripts/preflight-check.sh` on startup. Failures
@@ -159,8 +162,7 @@ channels rather than poking the store directly.
 
 Defaults live in [`config.default.json`](./config.default.json). Override per
 install via `~/.jarvis/settings.user.json` under
-`plugins.jarvis-plugin-mnemosyne`. Full spec in
-[architecture.md](~/dev/personal/claude-dotfiles/knowledge/projects/mnemosyne/architecture.md).
+`plugins.jarvis-plugin-mnemosyne`. Full spec in `config.default.json` (root of this repo).
 
 Notable knobs:
 
@@ -258,8 +260,8 @@ make typecheck    # tsc --noEmit
 make test         # vitest run --no-file-parallelism
 ```
 
-- **71 unit tests** passing (no external services required)
-- **30+ integration tests** require the Docker stack running — they exercise
+- **35 unit tests** passing (no external services required)
+- **7 integration tests** require the Docker stack running — they exercise
   Chroma + Neo4j end-to-end. Use `scripts/wipe-test-state.sh` between runs.
 - `--no-file-parallelism` is required: tests share Chroma/Neo4j ports and
   must serialize.
@@ -277,29 +279,27 @@ make test         # vitest run --no-file-parallelism
 
 ### Errata — required reading before extending
 
-The implementation plan
-[`docs/superpowers/plans/2026-04-26-mnemosyne-v1.md`](~/dev/personal/jarvis-app/docs/superpowers/plans/2026-04-26-mnemosyne-v1.md)
-has **34 errata entries** at the top documenting plan-vs-reality
-deviations encountered during implementation (port choices, schema
-adjustments, prompt iterations, race fixes). Read them before changing
-anything load-bearing — most "obvious" tweaks have already been tried and
-have a recorded reason for landing where they did.
+The original implementation plan had **34 errata entries** documenting plan-vs-reality
+deviations (port choices, schema adjustments, prompt iterations, race fixes). Key
+decisions are documented in code comments throughout `pieces/index.ts`,
+`lib/extractor.ts`, and `lib/neo4j-adapter.ts`. Read the inline comments before
+changing anything load-bearing — most "obvious" tweaks have already been tried and have
+a recorded reason for landing where they did.
 
 ---
 
 ## Roadmap
 
-Full version sequencing in
-[`knowledge/projects/mnemosyne/roadmap.md`](~/dev/personal/claude-dotfiles/knowledge/projects/mnemosyne/roadmap.md).
+Full version sequencing planned:
 
 | Version | Focus |
 |---|---|
 | **v1.0** | Full-stack MVP — extract, store, retrieve, consolidate, replay |
-| **v1.1 (current)** | Sync first-turn injection — pendingFetch pattern, async `ContextInjectorFn`, dedup by block hash, compaction reset |
-| v1.1 | Anti-hallucination layer — provenance, citation enforcement |
-| v1.2 | Query intelligence — semantic query rewrite, intent classification |
-| v1.3 | Adaptive retrieval — learned rerank weights per query class |
-| v1.4+ | Async hardening, reconsolidation surfacing, workflow learning |
+| **v1.1 (current)** | Sync first-turn injection — pendingFetch pattern, async `ContextInjectorFn`, dedup by block hash, compaction reset. Multilingual encoding, origin tracking, injection dedup, query enrichment. |
+| v1.2 | Anti-hallucination layer — provenance, citation enforcement |
+| v1.3 | Query intelligence — semantic query rewrite, intent classification |
+| v1.4 | Adaptive retrieval — learned rerank weights per query class |
+| v1.5+ | Async hardening, reconsolidation surfacing, workflow learning |
 
 ---
 
