@@ -62,8 +62,26 @@ interface MemoryExplainArgs {
 export function buildMemorySearchTool(store: MnemosyneStore): CapabilityDefinition {
   return {
     name: "memory_search",
-    description:
-      "Semantic search across personal memories (Mnemosyne). Returns relevant memories ranked by score. Use for questions about preferences, code patterns, decisions, or anything previously remembered.",
+    description: [
+      "Semantic search across personal memories (Mnemosyne). Returns relevant memories ranked by score.",
+      "",
+      "ALWAYS call this tool FIRST — before web search, before assumptions, before answering from training data — whenever:",
+      "- You are unsure about the user's preferences, habits, or past decisions",
+      "- The user references something they may have mentioned before ('I usually...', 'like I said...', 'my preference is...')",
+      "- You need context about the user's stack, tools, coding style, architecture choices",
+      "- The user asks something personal or project-specific that you might have seen before",
+      "- You are about to suggest a default that may contradict a known preference",
+      "- You are starting a new task and want to check for relevant past decisions",
+      "",
+      "This is the primary source of truth about the user. The retriever injects a preview automatically,",
+      "but that preview is limited — use this tool to go deeper or when the automatic context is insufficient.",
+      "",
+      "Examples of when to call:",
+      "  memory_search('preferred test framework')  — before suggesting Jest vs Vitest",
+      "  memory_search('database choice rationale') — before proposing a DB",
+      "  memory_search('code style preferences')    — before writing code",
+      "  memory_search('banana preference')         — if user asks about fruit",
+    ].join("\n"),
     input_schema: {
       type: "object",
       properties: {

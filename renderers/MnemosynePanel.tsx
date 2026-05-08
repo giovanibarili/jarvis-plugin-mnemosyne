@@ -18,6 +18,7 @@ import MemoryCard from "./MemoryCard";
 import PreflightErrorPanel from "./PreflightErrorPanel";
 import WorkflowReplayDialog from "./WorkflowReplayDialog";
 import GraphTab from "./GraphTab";
+import StatsBlock from "./StatsBlock";
 import type {
   Memory,
   PanelData,
@@ -95,6 +96,7 @@ export default function MnemosynePanel({ state }: Props) {
   const [filterProject, setFilterProject] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string>("");
+  const [statsCollapsed, setStatsCollapsed] = useState<boolean>(false);
 
   const memories: Memory[] = data?.memories ?? [];
   const stats = data?.stats ?? { total: 0, short: 0, long: 0 };
@@ -175,10 +177,24 @@ export default function MnemosynePanel({ state }: Props) {
   }, []);
 
   const handleDelete = useCallback(async (id: string) => {
-    if (!window.confirm("Forget this memory? This cannot be undone.")) return;
-    const r = await postJson(`${PLUGIN_BASE}/forget`, { id });
-    flash(r?.ok === false ? `forget failed: ${r.error}` : "🧠 forgotten");
-    if (selectedId === id) setSelectedId(null);
+    // We keep a tiny confirm step but make it visible so the user can see why
+    // a click "did nothing" — Electron's native window.confirm sometimes
+    // dismisses without showing in sandboxed/renderer contexts. To avoid that
+    // entirely we use a second-click pattern: the first click flashes a
+    // warning + arms a 4s window during which a second click actually deletes.
+    const armedKey = `__mnemo_delete_armed_${id}`;
+    const w = window as any;
+    if (w[armedKey]) {
+      clearTimeout(w[armedKey]);
+      delete w[armedKey];
+      flash("🗑 deleting…");
+      const r = await postJson(`${PLUGIN_BASE}/forget`, { id });
+      flash(r?.ok === false ? `forget failed: ${r.error}` : "🧠 forgotten");
+      if (selectedId === id) setSelectedId(null);
+      return;
+    }
+    flash("⚠ click trash again within 4s to forget");
+    w[armedKey] = setTimeout(() => { delete w[armedKey]; }, 4000);
   }, [selectedId]);
 
   const handleConsolidate = useCallback(async () => {
@@ -218,6 +234,12 @@ export default function MnemosynePanel({ state }: Props) {
           </span>
         )}
       </div>
+
+      <StatsBlock
+        runtime={data?.runtime}
+        collapsed={statsCollapsed}
+        onToggle={() => setStatsCollapsed((v: boolean) => !v)}
+      />
 
       <div style={styles.tabBar}>
         <button

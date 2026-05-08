@@ -1,11 +1,14 @@
 import { promises as fs } from "fs";
 import { join } from "path";
-import type {
-  Category,
-  MemoryCandidate,
-  WorkflowCandidate,
-  TriageResult,
-  TurnContext,
+import {
+  CANONICAL_CATEGORIES,
+  type CanonicalCategory,
+  type Category,
+  type MemoryCandidate,
+  type ProposedCategory,
+  type TriageResult,
+  type TurnContext,
+  type WorkflowCandidate,
 } from "./types";
 
 export interface LLMClient {
@@ -22,16 +25,37 @@ export interface ExtractorResult {
   workflow: WorkflowCandidate | null;
   triage: TriageResult;
   costUsd: number;
+  /** Categories whose extraction prompts were auto-generated this run. */
+  newPromptsGenerated?: string[];
 }
+
+const SLUG_RE = /^[a-z][a-z0-9-]{1,40}$/;
 
 export class Extractor {
   private promptCache = new Map<string, string>();
+  private knownDynamic = new Set<string>(); // discovered at construction + after each generate
 
   constructor(
     private llm: LLMClient,
     private promptsDir: string,
     private minConfidence = 0.6
   ) {}
+
+  /** Call once at startup so the triage prompt can list dynamic categories. */
+  async init(): Promise<void> {
+    try {
+      const entries = await fs.readdir(this.promptsDir);
+      for (const e of entries) {
+        const m = e.match(/^extract-(.+)\.md$/);
+        if (!m) continue;
+        const id = m[1];
+        if ((CANONICAL_CATEGORIES as readonly string[]).includes(id)) continue;
+        this.knownDynamic.add(id);
+      }
+    } catch {
+      // prompts dir may not exist yet in test fixtures
+    }
+  }
 
   private async loadPrompt(name: string): Promise<string> {
     const cached = this.promptCache.get(name);
@@ -45,18 +69,47 @@ export class Extractor {
     const tools = turn.tool_calls
       .map((tc) => `${tc.tool}(${JSON.stringify(tc.args)})`)
       .join("\n");
-    return `User: ${turn.user_message}\n\nAssistant: ${turn.assistant_response}\n\nTool calls:\n${tools}`;
+
+    const currentTurn = `User: ${turn.user_message}\n\nAssistant: ${turn.assistant_response}\n\nTool calls:\n${tools}`;
+
+    if (!turn.prior_turns?.length) return currentTurn;
+
+    // Prepend condensed context window — user messages only to keep tokens low.
+    // Tool calls and assistant responses from prior turns are omitted; the
+    // current turn's full content is what the extractor judges.
+    const contextLines = turn.prior_turns.map((t, i) => {
+      const label = `[Turn -${turn.prior_turns!.length - i}]`;
+      return `${label} User: ${t.user_message.slice(0, 300)}${t.user_message.length > 300 ? "…" : ""}\n${label} Assistant: ${t.assistant_response.slice(0, 200)}${t.assistant_response.length > 200 ? "…" : ""}`;
+    });
+
+    return `--- CONTEXT ONLY — DO NOT EXTRACT FROM THIS SECTION (${turn.prior_turns.length} prior turns for reference) ---
+${contextLines.join("\n\n")}
+
+--- EXTRACT FROM THIS TURN ONLY — this is the new content to analyse ---
+${currentTurn}`;
+  }
+
+  private renderKnownDynamicBlock(): string {
+    if (this.knownDynamic.size === 0) return "";
+    const lines = [...this.knownDynamic]
+      .sort()
+      .map((id) => `- ${id}: previously proposed dynamic category`);
+    return `\n## Previously discovered dynamic categories (also valid)\n${lines.join("\n")}`;
   }
 
   async triage(turn: TurnContext): Promise<TriageResult> {
     const template = await this.loadPrompt("triage.md");
-    const prompt = template.replace("{{TURN}}", this.renderTurn(turn));
+    const prompt = template
+      .replace("{{TURN}}", this.renderTurn(turn))
+      .replace("{{KNOWN_DYNAMIC_CATEGORIES}}", this.renderKnownDynamicBlock());
     const raw = await this.llm.call({
       system: prompt,
       user: "Extract.",
-      maxTokens: 200,
+      maxTokens: 400,
     });
-    return JSON.parse(this.stripJsonFence(raw));
+    const parsed = JSON.parse(this.stripJsonFence(raw)) as TriageResult;
+    parsed.proposed = parsed.proposed ?? [];
+    return parsed;
   }
 
   async extractCategory(
@@ -86,13 +139,71 @@ export class Extractor {
     const raw = await this.llm.call({
       system: prompt,
       user: "Extract.",
-      maxTokens: 1500,
+      maxTokens: 2000,
     });
-    const parsed = JSON.parse(this.stripJsonFence(raw));
+    let parsed: any;
+    try {
+      parsed = JSON.parse(this.stripJsonFence(raw));
+    } catch (e) {
+      console.warn("[mnemosyne] workflow JSON parse failed:", e, "raw:", raw.slice(0, 200));
+      return null;
+    }
     if (!parsed.is_workflow) return null;
-    if (!parsed.workflow?.steps || parsed.workflow.steps.length < 3) return null;
-    if (parsed.workflow.confidence < this.minConfidence) return null;
+    const steps = parsed.workflow?.steps ?? [];
+    if (steps.length < 2) {
+      console.debug(`[mnemosyne] workflow dropped: only ${steps.length} step(s) — need 2+`);
+      return null;
+    }
+    if ((parsed.workflow.confidence ?? 0) < this.minConfidence) {
+      console.debug(`[mnemosyne] workflow dropped: confidence ${parsed.workflow.confidence} < ${this.minConfidence}`);
+      return null;
+    }
     return parsed as WorkflowCandidate;
+  }
+
+  /**
+   * Validate a proposed category and, if accepted and not already on disk,
+   * author its extract-<id>.md via the meta-prompt. Returns true if the
+   * category is now usable for extraction.
+   */
+  private async ensurePromptForProposed(
+    proposal: ProposedCategory
+  ): Promise<boolean> {
+    const id = proposal.id?.trim().toLowerCase();
+    if (!id || !SLUG_RE.test(id)) return false;
+    if ((CANONICAL_CATEGORIES as readonly string[]).includes(id)) return true;
+    if (this.knownDynamic.has(id)) return true;
+
+    const path = join(this.promptsDir, `extract-${id}.md`);
+    try {
+      await fs.access(path);
+      this.knownDynamic.add(id);
+      return true;
+    } catch {
+      // file missing — generate it
+    }
+
+    if (!proposal.description?.trim() || !proposal.hint?.trim()) return false;
+
+    const meta = await this.loadPrompt("generate-extractor.md");
+    const prompt = meta
+      .replace(/\{\{CATEGORY_ID\}\}/g, id)
+      .replace(/\{\{CATEGORY_DESCRIPTION\}\}/g, proposal.description.trim())
+      .replace(/\{\{CATEGORY_HINT\}\}/g, proposal.hint.trim());
+    const generated = await this.llm.call({
+      system: prompt,
+      user: "Author the prompt now.",
+      maxTokens: 800,
+    });
+    const body = this.stripJsonFence(generated).trim();
+    if (!body || !body.includes("{{TURN}}") || !body.includes(`"${id}"`)) {
+      // Reject malformed output — keep the system safe rather than store junk.
+      return false;
+    }
+    await fs.writeFile(path, `${body}\n`, "utf-8");
+    this.promptCache.delete(`extract-${id}.md`); // force re-read on next use
+    this.knownDynamic.add(id);
+    return true;
   }
 
   async extract(turn: TurnContext): Promise<ExtractorResult> {
@@ -101,32 +212,45 @@ export class Extractor {
       return { candidates: [], workflow: null, triage, costUsd: 0.0001 };
     }
 
-    // Defense against LLM hallucination: triage prompts list 7 categories
-    // (code-pattern, preference, architecture-decision, mental-model, glossary,
-    // anti-pattern, workflow) but Haiku occasionally returns made-up labels
-    // like "convention". Drop anything we don't have a prompt file for.
-    const validCategories: Set<Category> = new Set([
-      "code-pattern",
-      "preference",
-      "architecture-decision",
-      "mental-model",
-      "glossary",
-      "anti-pattern",
-      "workflow",
-    ]);
-    const filtered = triage.present.filter((c) => validCategories.has(c as Category));
-    if (filtered.length < triage.present.length) {
-      // Replace triage.present with the cleaned list so logging reflects reality.
-      triage.present = filtered;
-    }
-    if (filtered.length === 0) {
-      return { candidates: [], workflow: null, triage, costUsd: 0.0001 };
+    // Resolve each proposed id: canonical / known dynamic / new (auto-author).
+    const proposalById = new Map<string, ProposedCategory>();
+    for (const p of triage.proposed ?? []) proposalById.set(p.id, p);
+
+    const accepted: Category[] = [];
+    const newPromptsGenerated: string[] = [];
+    for (const id of triage.present) {
+      if ((CANONICAL_CATEGORIES as readonly string[]).includes(id)) {
+        accepted.push(id);
+        continue;
+      }
+      if (this.knownDynamic.has(id)) {
+        accepted.push(id);
+        continue;
+      }
+      const proposal = proposalById.get(id);
+      if (!proposal) continue; // dynamic id without metadata — drop
+      const before = this.knownDynamic.has(id);
+      const ok = await this.ensurePromptForProposed(proposal);
+      if (!ok) continue;
+      if (!before) newPromptsGenerated.push(id);
+      accepted.push(id);
     }
 
-    const memoryCategories = filtered.filter(
-      (c) => c !== "workflow"
-    ) as Category[];
-    const hasWorkflow = filtered.includes("workflow");
+    if (accepted.length < triage.present.length) {
+      triage.present = accepted; // reflect reality in logs
+    }
+    if (accepted.length === 0) {
+      return {
+        candidates: [],
+        workflow: null,
+        triage,
+        costUsd: 0.0001,
+        newPromptsGenerated,
+      };
+    }
+
+    const memoryCategories = accepted.filter((c) => c !== "workflow");
+    const hasWorkflow = accepted.includes("workflow" as CanonicalCategory);
 
     const promises: Promise<MemoryCandidate[] | WorkflowCandidate | null>[] = [];
     for (const cat of memoryCategories) {
@@ -146,8 +270,10 @@ export class Extractor {
       workflow = results[results.length - 1] as WorkflowCandidate | null;
     }
 
-    const costUsd = 0.0001 + 0.0003 * promises.length;
-    return { candidates, workflow, triage, costUsd };
+    // Prompt-authoring uses a small model; cost stays close to canonical path.
+    const promptGenCost = 0.0005 * newPromptsGenerated.length;
+    const costUsd = 0.0001 + 0.0003 * promises.length + promptGenCost;
+    return { candidates, workflow, triage, costUsd, newPromptsGenerated };
   }
 
   private stripJsonFence(s: string): string {

@@ -3,6 +3,9 @@ import { EventBus } from "@jarvis/core";
 import type { MnemosyneStore } from "../lib/store";
 import type { Neo4jAdapter } from "../lib/neo4j-adapter";
 import type { Logger } from "../lib/logger";
+import type { EncoderPiece } from "./encoder";
+import type { RetrieverPiece } from "./retriever";
+import { buildStats } from "../lib/stats";
 
 /**
  * HUD panel piece for Mnemosyne.
@@ -46,7 +49,25 @@ export class PanelPiece implements Piece {
     private store: MnemosyneStore,
     private neo4j: Neo4jAdapter,
     private logger: Logger,
+    // Encoder + retriever are wired in after construction (the panel is
+    // built before them in pieces/index.ts to keep the Bootstrap interface
+    // simple). The setters below let bootstrap inject the references when
+    // ready; until then, stats default to zeros.
+    private encoder?: EncoderPiece,
+    private retriever?: RetrieverPiece,
+    // Mnemosyne root dir (defaults to ~/.jarvis/mnemosyne) — used to read
+    // the Haiku-maintained skip-buckets.json. Injected so tests can point
+    // at a temp dir.
+    private rootDir: string = `${process.env.HOME}/.jarvis/mnemosyne`,
   ) {}
+
+  /** Late binding for stats sources. Called by pieces/index.ts after both
+   *  the encoder and retriever instances exist. Safe to call multiple times
+   *  (last write wins) — bootstrap is single-threaded. */
+  setStatsSources(encoder: EncoderPiece, retriever: RetrieverPiece): void {
+    this.encoder = encoder;
+    this.retriever = retriever;
+  }
 
   async start(bus: EventBus): Promise<void> {
     this.bus = bus;
@@ -109,28 +130,69 @@ export class PanelPiece implements Piece {
       return;
     }
 
-    this.bus.publish({
-      channel: "hud.update",
-      source: this.id,
-      action,
-      pieceId: this.id,
-      piece: {
-        pieceId: this.id,
-        type: "panel",
-        name: "Mnemosyne",
-        status: "running",
-        data: {
-          memories: memories.slice(0, 100),
-          stats: {
-            total: memories.length,
-            short: memories.filter((m) => !m.promoted_at).length,
-            long: memories.filter((m) => m.promoted_at).length,
-          },
+    // Build the runtime stats block. Encoder/retriever may not be wired
+    // yet (bootstrap order); buildStats falls back to zeros gracefully.
+    // We try/catch because skip-buckets.json read is best-effort — we do
+    // NOT want a stat-loading hiccup to drop the memories payload.
+    let runtimeStats = null;
+    try {
+      runtimeStats = await buildStats({
+        rootDir: this.rootDir,
+        encoderStats: this.encoder?.getStats() ?? {
+          turnsProcessed: 0, turnsSkipped: 0, turnsErrored: 0,
+          candidatesEmitted: 0, memoriesWritten: 0, memoriesDeduped: 0,
+          costUsd: 0, queueDepth: 0, processing: false, categoriesCount: {},
         },
-        position: { x: 100, y: 100 },
-        size: { width: 1100, height: 640 },
-        renderer: { plugin: "jarvis-plugin-mnemosyne", file: "MnemosynePanel" },
+        retrieverStats: this.retriever?.getStats() ?? {
+          retrievals: 0, retrievalsWithHits: 0, cacheHits: 0,
+          hitsTotal: 0, avgHits: 0, reinforcements: 0,
+          injections: 0, injectionsWithBlock: 0, sessionsTracked: 0,
+        },
+        totalMemories: memories.length,
+      });
+    } catch (e) {
+      console.warn(`[mnemosyne-panel] buildStats failed: ${String(e)}`);
+    }
+
+    const data = {
+      memories: memories.slice(0, 100),
+      stats: {
+        total: memories.length,
+        short: memories.filter((m) => !m.promoted_at).length,
+        long: memories.filter((m) => m.promoted_at).length,
       },
-    });
+      runtime: runtimeStats,
+    };
+
+    if (action === "add") {
+      // Initial registration — HudState reads `msg.piece` here.
+      this.bus.publish({
+        channel: "hud.update",
+        source: this.id,
+        action,
+        pieceId: this.id,
+        piece: {
+          pieceId: this.id,
+          type: "panel",
+          name: "Mnemosyne",
+          status: "running",
+          data,
+          position: { x: 100, y: 100 },
+          size: { width: 1100, height: 640 },
+          renderer: { plugin: "jarvis-plugin-mnemosyne", file: "MnemosynePanel" },
+        },
+      });
+    } else {
+      // Update — HudState's `case "update"` reads `msg.data` (top-level), not
+      // `msg.piece.data`. Sending the full piece envelope here would silently
+      // be a no-op, leaving the HUD with stale memories after delete/pin.
+      this.bus.publish({
+        channel: "hud.update",
+        source: this.id,
+        action,
+        pieceId: this.id,
+        data,
+      });
+    }
   }
 }

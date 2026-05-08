@@ -167,6 +167,76 @@ export class Neo4jAdapter {
   }
 
   /**
+   * Create a directed RELATES_TO edge from memory A to memory B.
+   * Used by the SemanticRelationLinker (Pass 3) to wire non-trivial
+   * semantic relations discovered at write time.
+   *
+   * The edge carries:
+   *   - relation: semantic label ("reinforces" | "extends" | "example-of" | "depends-on")
+   *   - score:    cosine similarity that triggered the link (0–1)
+   *   - source:   always "semantic" so the edge can be filtered/audited
+   *   - created_at: epoch ms
+   *
+   * MERGE on (aId, bId, relation) — re-running on the same pair only
+   * updates score/created_at, never duplicates the edge.
+   */
+  async createRelatesToEdge(
+    aId: string,
+    bId: string,
+    relation: string,
+    score: number
+  ): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(
+        `MATCH (a:Memory {id: $aId}), (b:Memory {id: $bId})
+         MERGE (a)-[r:RELATES_TO {relation: $relation}]->(b)
+         SET r.score      = $score,
+             r.source     = 'semantic',
+             r.created_at = $now`,
+        { aId, bId, relation, score, now: Date.now() }
+      );
+    } finally {
+      await s.close();
+    }
+  }
+
+  /**
+   * Return all RELATES_TO edges for a given memory (outgoing + incoming).
+   * Used by the panel renderer and future retriever graph-hop expansion.
+   */
+  async getRelations(
+    id: string
+  ): Promise<
+    Array<{
+      targetId: string;
+      relation: string;
+      score: number;
+      direction: "outgoing" | "incoming";
+    }>
+  > {
+    const s = this.session();
+    try {
+      const result = await s.run(
+        `MATCH (m:Memory {id: $id})-[r:RELATES_TO]-(other:Memory)
+         RETURN other.id AS targetId,
+                r.relation AS relation,
+                r.score AS score,
+                CASE WHEN startNode(r).id = $id THEN 'outgoing' ELSE 'incoming' END AS direction`,
+        { id }
+      );
+      return result.records.map((rec) => ({
+        targetId: rec.get("targetId"),
+        relation: rec.get("relation"),
+        score: rec.get("score")?.toNumber?.() ?? rec.get("score"),
+        direction: rec.get("direction") as "outgoing" | "incoming",
+      }));
+    } finally {
+      await s.close();
+    }
+  }
+
+  /**
    * Create a bidirectional CONTRADICTS edge between two memories. Used by the
    * consolidator's conflict detector — both nodes stay in the graph (D6 keep-both)
    * and the retriever surfaces the conflict at query time.

@@ -82,9 +82,49 @@ export interface PreflightFailure {
  * Data shape published by `pieces/panel.ts` on the `hud.update` channel.
  * Renderers consume this via `useHudPiece(state.id)?.data`.
  */
+/** Runtime metrics block produced by lib/stats.ts. Optional in PanelData
+ *  because older builds and degraded states (bootstrap-failure path) don't
+ *  populate it. */
+export interface RuntimeStats {
+  encoder: {
+    turnsProcessed: number;
+    turnsSkipped: number;
+    turnsErrored: number;
+    candidatesEmitted: number;
+    memoriesWritten: number;
+    memoriesDeduped: number;
+    costUsd: number;
+    queueDepth: number;
+    processing: boolean;
+    categoriesCount: Record<string, number>;
+  };
+  retriever: {
+    retrievals: number;
+    retrievalsWithHits: number;
+    cacheHits: number;
+    hitsTotal: number;
+    avgHits: number;
+    reinforcements: number;
+    injections: number;
+    injectionsWithBlock: number;
+    sessionsTracked: number;
+  };
+  skipBuckets: {
+    casual: number;
+    "no-signal": number;
+    error: number;
+    timeout: number;
+    other: number;
+  };
+  totalMemories: number;
+  bucketMapUpdatedAt: string | null;
+}
+
 export interface PanelData {
   memories: Memory[];
   stats: MemoryStats;
+  /** Live runtime metrics — encoder, retriever, skip buckets. */
+  runtime?: RuntimeStats | null;
   /** Set when the bootstrap fails or the store is unavailable. */
   error?: string;
   /** Set when preflight blocks plugin start. PreflightErrorPanel renders this. */

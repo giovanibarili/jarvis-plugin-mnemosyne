@@ -1,6 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fileURLToPath } from "url";
-import { dirname, resolve } from "path";
+import { dirname, resolve, join } from "path";
+import { promises as fs } from "fs";
+import { tmpdir } from "os";
 import { Extractor } from "../../lib/extractor";
 import type { LLMClient } from "../../lib/extractor";
 import type { TurnContext } from "../../lib/types";
@@ -139,5 +141,132 @@ describe("Extractor", () => {
       makeTurn({ user_message: "x", assistant_response: "y" })
     );
     expect(result.candidates.length).toBe(0);
+  });
+
+  describe("dynamic categories", () => {
+    let scratchDir: string;
+
+    beforeEach(async () => {
+      scratchDir = await fs.mkdtemp(join(tmpdir(), "mnemo-prompts-"));
+      // Copy required prompts so the extractor can read them.
+      for (const f of ["triage.md", "generate-extractor.md"]) {
+        await fs.copyFile(resolve(promptsDir, f), join(scratchDir, f));
+      }
+    });
+
+    afterEach(async () => {
+      await fs.rm(scratchDir, { recursive: true, force: true });
+    });
+
+    it("auto-generates extract-<id>.md when triage proposes a new category", async () => {
+      const triageJson = JSON.stringify({
+        present: ["incident-postmortem"],
+        proposed: [
+          {
+            id: "incident-postmortem",
+            description: "Lessons from production incidents.",
+            hint: "User narrates a postmortem with timeline + root cause.",
+          },
+        ],
+        skip_reason: null,
+      });
+      const generatedPrompt = `Extract incident postmortems from the turn below.\n\nTurn:\n"""\n{{TURN}}\n"""\n\nOutput JSON only:\n{\n  "candidates": [\n    {\n      "category": "incident-postmortem",\n      "title": "string ~6 words",\n      "content": "1-3 sentences",\n      "tags": ["tag"],\n      "project": null,\n      "confidence": 0.9,\n      "evidence": "quote",\n      "visibility": "open"\n    }\n  ]\n}\n\nIf no incident-postmortem is clearly expressed, return {"candidates": []}.`;
+      const candJson = JSON.stringify({
+        candidates: [
+          {
+            category: "incident-postmortem",
+            title: "DB outage from missing index",
+            content: "Outage caused by absent index on hot table.",
+            tags: ["db", "postmortem"],
+            project: null,
+            confidence: 0.92,
+            evidence: "we lost the table",
+            visibility: "open",
+          },
+        ],
+      });
+      const llm: LLMClient = {
+        call: vi
+          .fn()
+          .mockResolvedValueOnce(triageJson)
+          .mockResolvedValueOnce(generatedPrompt)
+          .mockResolvedValueOnce(candJson),
+      };
+      const ext = new Extractor(llm, scratchDir);
+      await ext.init();
+      const result = await ext.extract(
+        makeTurn({ user_message: "let me share a postmortem...", assistant_response: "ok" })
+      );
+      expect(result.newPromptsGenerated).toEqual(["incident-postmortem"]);
+      expect(result.candidates.length).toBe(1);
+      expect(result.candidates[0].category).toBe("incident-postmortem");
+      // The file was authored on disk and is reusable on next turn.
+      const written = await fs.readFile(
+        join(scratchDir, "extract-incident-postmortem.md"),
+        "utf-8"
+      );
+      expect(written).toContain("{{TURN}}");
+      expect(written).toContain("incident-postmortem");
+    });
+
+    it("rejects malformed slug for proposed category", async () => {
+      const triageJson = JSON.stringify({
+        present: ["NotASlug!"],
+        proposed: [
+          { id: "NotASlug!", description: "x", hint: "y" },
+        ],
+        skip_reason: null,
+      });
+      const llm: LLMClient = {
+        call: vi.fn().mockResolvedValueOnce(triageJson),
+      };
+      const ext = new Extractor(llm, scratchDir);
+      await ext.init();
+      const result = await ext.extract(makeTurn());
+      expect(result.candidates.length).toBe(0);
+      expect(result.newPromptsGenerated ?? []).toEqual([]);
+      expect(result.triage.present).toEqual([]);
+    });
+
+    it("reuses existing dynamic prompt without re-authoring", async () => {
+      // Pre-author the prompt as if a previous run had generated it.
+      await fs.writeFile(
+        join(scratchDir, "extract-runbook.md"),
+        `Extract runbooks.\nTurn:\n"""\n{{TURN}}\n"""\nOutput JSON only:\n{"candidates":[{"category":"runbook","title":"t","content":"c","tags":[],"project":null,"confidence":0.9,"evidence":"e","visibility":"open"}]}\nIf no runbook, return {"candidates": []}.\n`,
+        "utf-8"
+      );
+      const triageJson = JSON.stringify({
+        present: ["runbook"],
+        proposed: [], // not even necessary — id is already known
+        skip_reason: null,
+      });
+      const candJson = JSON.stringify({
+        candidates: [
+          {
+            category: "runbook",
+            title: "Restart deposits-api",
+            content: "When stuck, kubectl rollout restart.",
+            tags: ["ops"],
+            project: null,
+            confidence: 0.9,
+            evidence: "kubectl",
+            visibility: "open",
+          },
+        ],
+      });
+      const llm: LLMClient = {
+        call: vi
+          .fn()
+          .mockResolvedValueOnce(triageJson)
+          .mockResolvedValueOnce(candJson),
+      };
+      const ext = new Extractor(llm, scratchDir);
+      await ext.init();
+      const result = await ext.extract(makeTurn());
+      expect(result.newPromptsGenerated ?? []).toEqual([]);
+      expect(result.candidates.length).toBe(1);
+      // Only triage + extract were called — no meta-prompt.
+      expect(llm.call).toHaveBeenCalledTimes(2);
+    });
   });
 });

@@ -45,6 +45,10 @@ export class MarkdownStore {
       last_accessed: new Date(memory.last_accessed).toISOString(),
       source_sessions: [memory.source_session],
       promoted_at: memory.promoted_at ? new Date(memory.promoted_at).toISOString() : null,
+      evidence: memory.evidence ?? null,
+      origin_source: memory.origin_source ?? null,
+      origin_tool: memory.origin_tool ?? null,
+      origin_ref: memory.origin_ref ?? null,
     };
 
     const fileContent = `---\n${yamlStringify(frontmatter)}---\n\n${memory.content}\n`;
@@ -91,6 +95,10 @@ export class MarkdownStore {
             last_accessed: new Date(data.last_accessed).getTime(),
             source_session: (data.source_sessions ?? ["unknown"])[0],
             promoted_at: data.promoted_at ? new Date(data.promoted_at).getTime() : null,
+            evidence: data.evidence ?? undefined,
+            origin_source: data.origin_source ?? undefined,
+            origin_tool: data.origin_tool ?? undefined,
+            origin_ref: data.origin_ref ?? undefined,
           };
           if (filter.visibility && mem.visibility !== filter.visibility) continue;
           if (filter.pinned !== undefined && mem.pinned !== filter.pinned) continue;

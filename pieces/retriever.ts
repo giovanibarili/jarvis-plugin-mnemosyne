@@ -3,11 +3,22 @@ import type { MnemosyneStore } from "../lib/store";
 import type { Reranker } from "../lib/reranker";
 import type { RetrievalHit } from "../lib/types";
 import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
+import { computeMatchSnippet } from "../lib/match-snippet.js";
 
 export interface RetrieverOptions {
   topK: number;
   graphHops: number;
   workflowLookupEnabled: boolean;
+  /**
+   * Minimum cosine similarity (1 − distance) for a vector hit to enter the
+   * pipeline. Anything below is dropped before rerank/graph expansion. With
+   * MiniLM the observed range is roughly +0.3 (strong) to −0.8 (opposite),
+   * so a cutoff at 0.0 eliminates "more orthogonal than aligned" matches —
+   * which is the right semantic for "do not inject this".
+   *
+   * Default 0.0 (parity with old behaviour minus the most obvious noise).
+   */
+  minVectorSim?: number;
 }
 
 /**
@@ -38,11 +49,14 @@ export class RetrieverPiece {
 
   // Per-session caches. Both maps are keyed by sessionId.
   //   lastUserMsg:   most recent user prompt observed on ai.request
+  //   recentTurns:   ring buffer of last N {user, assistant} pairs for query enrichment
   //   cache:         formatted block keyed by the user message that produced it
   //   pendingFetch:  in-flight systemContext() Promise for the current turn —
   //                  the injector awaits this with a timeout so it always gets
   //                  fresh data on the same turn the ai.request arrived.
   private lastUserMsg = new Map<string, string>();
+  private recentTurns = new Map<string, Array<{ user: string; assistant: string }>>();
+  private readonly QUERY_CONTEXT_TURNS = 5;
   private cache = new Map<string, { lastUserMsg: string; block: string }>();
   /** In-flight fetch per session — awaited by the injector with timeout. */
   pendingFetch = new Map<string, Promise<string>>();
@@ -96,9 +110,33 @@ export class RetrieverPiece {
   async start(bus: EventBus): Promise<void> {
     if (this._started) return; // guard against double-start (hot reload, etc.)
     this._started = true;
+
+    // Track assistant responses to enrich future queries with conversation context.
+    // We accumulate chunks and commit the full response on stream end.
+    const assistantChunks = new Map<string, string>();
+    bus.subscribe("ai.stream", (msg: any) => {
+      const sid = (msg.target ?? msg.session_id ?? "main") as string;
+      if (msg.event === "chunk" && msg.text) {
+        assistantChunks.set(sid, (assistantChunks.get(sid) ?? "") + msg.text);
+      } else if (msg.event === "end" || msg.event === "done") {
+        const assistant = assistantChunks.get(sid) ?? "";
+        assistantChunks.delete(sid);
+        if (!assistant) return;
+        // Commit the completed turn into the ring buffer
+        const user = this.lastUserMsg.get(sid) ?? "";
+        const hist = this.recentTurns.get(sid) ?? [];
+        hist.push({ user, assistant });
+        if (hist.length > this.QUERY_CONTEXT_TURNS) hist.shift();
+        this.recentTurns.set(sid, hist);
+      }
+    });
+
     bus.subscribe<AIRequestMessage>("ai.request", (msg) => {
       const sid = msg.target ?? "main";
       const text = msg.text ?? "";
+      // Skip system-generated messages (plugin notifications, cron triggers,
+      // etc.) — they are not user queries and produce misleading retrieval.
+      if (text.startsWith("[SYSTEM]") || text.startsWith("<system")) return;
       this.lastUserMsg.set(sid, text);
 
       // Kick off retrieval immediately on ai.request so the cache is warm
@@ -129,6 +167,27 @@ export class RetrieverPiece {
    * lookup we return the cached block verbatim — no DB hits, no
    * reinforcements bumped (D2: reinforce once per distinct user prompt).
    */
+  /**
+   * Build a retrieval query from the current user message enriched with
+   * the last N turns of conversation (user + assistant). This ensures that
+   * topics mentioned a few turns ago still surface relevant memories even
+   * when the current message is short or contextually sparse.
+   *
+   * Strategy: current message first (highest weight for MiniLM), then
+   * append key terms from prior turns (first 120 chars each, user + assistant).
+   */
+  private buildQuery(sid: string): string {
+    const lastMsg = this.lastUserMsg.get(sid) ?? "";
+    const hist = this.recentTurns.get(sid) ?? [];
+    if (!hist.length) return lastMsg;
+    const contextSnippets = hist
+      .slice(-this.QUERY_CONTEXT_TURNS)
+      .flatMap((t) => [t.user.slice(0, 120), t.assistant.slice(0, 120)])
+      .filter(Boolean)
+      .join(" ");
+    return `${lastMsg} ${contextSnippets}`.trim();
+  }
+
   async systemContext(sessionId?: string): Promise<string> {
     const sid = sessionId ?? "main";
     const lastMsg = this.lastUserMsg.get(sid);
@@ -141,7 +200,8 @@ export class RetrieverPiece {
     }
 
     this._stats.retrievals++;
-    const hits = await this.retrieve(lastMsg, sid);
+    const query = this.buildQuery(sid);
+    const hits = await this.retrieve(query, sid);
     this._stats.hitsTotal += hits.length;
     if (hits.length > 0) this._stats.retrievalsWithHits++;
 
@@ -202,16 +262,37 @@ export class RetrieverPiece {
     //    during the brief promotion window).
     const seen = new Set<string>();
     const memories: RetrievalHit[] = [];
+    // Cutoff in cosine-similarity space (range −1..+1). Default 0.0 means
+    // "drop any match that's more orthogonal than aligned with the query".
+    // Tunable via config so we can A/B different thresholds without code changes.
+    const minSim = this.opts.minVectorSim ?? 0.0;
     for (const ch of allChromaHits) {
       if (seen.has(ch.id)) continue;
+      const vectorSim = 1 - ch.distance;
+      // Apply the threshold BEFORE hydrating from markdown — saves I/O on
+      // hits we'll discard anyway.
+      if (vectorSim < minSim) continue;
       const mem = await this.store.markdownStore.read(ch.id);
       if (!mem) continue;
       if (mem.visibility === "private" && mem.source_session !== sessionId) continue;
       seen.add(mem.id);
-      memories.push({ memory: mem, score: 1 - ch.distance, source: "vector" });
+      // Preserve the raw vector similarity (1 - distance) BEFORE the reranker
+      // overwrites .score with the weighted total. This is what the chat UI
+      // surfaces as "did this memory match the prompt semantically?".
+      memories.push({
+        memory: mem,
+        score: vectorSim,
+        source: "vector",
+        vectorSim,
+        matchSnippet: computeMatchSnippet(query, mem),
+      });
     }
 
     // 3. Graph 1-hop expansion. Seeds are the surviving vector hits.
+    //    Graph hits don't have a vectorSim — they were pulled in by their
+    //    relation to a seed, not by direct semantic match. We still compute
+    //    the snippet though: even a graph-pulled memory may have lexical
+    //    overlap that explains why it's contextually relevant.
     const seedIds = memories.map((m) => m.memory.id);
     if (seedIds.length > 0) {
       const neighbors = await this.store.neo4j.oneHopNeighbors(seedIds);
@@ -219,7 +300,12 @@ export class RetrieverPiece {
         if (seen.has(n.id)) continue;
         if (n.visibility === "private" && n.source_session !== sessionId) continue;
         seen.add(n.id);
-        memories.push({ memory: n, score: 0.5, source: "graph" });
+        memories.push({
+          memory: n,
+          score: 0.5,
+          source: "graph",
+          matchSnippet: computeMatchSnippet(query, n),
+        });
       }
     }
 
@@ -231,6 +317,10 @@ export class RetrieverPiece {
     }
 
     // 5. Rerank and slice top-K.
+    //    Reranker overwrites .score with the weighted total but preserves
+    //    .vectorSim (we passed it through above). The UI uses vectorSim for
+    //    sorting/display so the user sees "best semantic match first" rather
+    //    than "most-reinforced first".
     const reranked = this.reranker.rerank(memories);
     return reranked.slice(0, this.opts.topK);
   }

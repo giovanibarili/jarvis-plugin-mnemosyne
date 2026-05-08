@@ -33,7 +33,31 @@
 // React (`createElement`) and HUD hooks come from the esbuild banner;
 // see renderers/globals.d.ts for the ambient declarations.
 
-import NeoVis, { NeoVisEvents } from "neovis.js";
+import * as NeoVisModule from "neovis.js";
+// neovis.js is UMD/CJS. esbuild's __toESM wraps it so the actual constructor
+// can land at `.default`, `.default.default`, or directly on the namespace.
+// Detect at runtime and unwrap defensively. Also pull out the static config
+// keys (NEOVIS_ADVANCED_CONFIG / NEOVIS_DEFAULT_CONFIG) which are exposed as
+// static properties on the constructor in some shapes and as named exports
+// on the module namespace in others.
+const _neovisAny = NeoVisModule as any;
+const NeoVis: any =
+  _neovisAny.default?.default ?? _neovisAny.default ?? _neovisAny;
+const NeoVisEvents: any =
+  _neovisAny.NeoVisEvents ??
+  _neovisAny.default?.NeoVisEvents ??
+  _neovisAny.default?.default?.NeoVisEvents;
+// Backfill the static config keys onto NeoVis so existing
+// `NeoVis.NEOVIS_ADVANCED_CONFIG` lookups keep working regardless of which
+// shape esbuild produced for this UMD bundle.
+for (const k of ["NEOVIS_ADVANCED_CONFIG", "NEOVIS_DEFAULT_CONFIG"]) {
+  if (NeoVis[k] == null) {
+    NeoVis[k] =
+      _neovisAny[k] ??
+      _neovisAny.default?.[k] ??
+      _neovisAny.default?.default?.[k];
+  }
+}
 import type { Memory, FilterCategory, Category } from "./types";
 
 interface Props {
@@ -145,6 +169,7 @@ function buildCypher(filters: Filters): string {
     MATCH (n:Memory)
     ${whereClause}
     OPTIONAL MATCH (n)-[r]-(m)
+    WHERE m IS NULL OR m:Memory OR m:Workflow OR m:Step
     RETURN n, r, m
     LIMIT 100
   `.trim();
@@ -168,7 +193,7 @@ function summarizeFilters(filters: Filters): string {
 
 export default function GraphTab({ memories, selectedId, onSelect, projects }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const visRef = useRef<NeoVis | null>(null);
+  const visRef = useRef<any>(null);
 
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [loading, setLoading] = useState<boolean>(true);
@@ -200,7 +225,7 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
     setError(null);
 
     let cancelled = false;
-    let viz: NeoVis;
+    let viz: any;
     try {
       viz = new NeoVis({
         containerId: containerRef.current.id,
@@ -220,9 +245,43 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
               static: {
                 shape: "dot",
-                font: { color: "#e0e0e0", size: 12 },
+                font: { color: "#e0e0e0", size: 11, strokeWidth: 2, strokeColor: "#000000", multi: false, vadjust: -2 },
               },
               function: {
+                // NOTE: label is set via the `label: "title"` key above (NeoVis string field),
+                // not via a function — because NeoVis passes a vis.js node (not Neo4j node)
+                // to function-label, so node.properties is undefined there.
+                // The function below is kept for reference but NOT used for label.
+                _label_unused: (node: any) => {
+                  const raw = String(node?.properties?.title ?? node?.properties?.id ?? "—");
+                  const maxLineLen = 24;
+                  const maxLines = 4;
+                  const words = raw.split(/\s+/);
+                  const lines: string[] = [];
+                  let cur = "";
+                  for (const w of words) {
+                    if (!cur) { cur = w; continue; }
+                    if ((cur + " " + w).length <= maxLineLen) {
+                      cur += " " + w;
+                    } else {
+                      lines.push(cur);
+                      cur = w;
+                      if (lines.length === maxLines) break;
+                    }
+                  }
+                  if (cur && lines.length < maxLines) lines.push(cur);
+                  // If we ran out of lines while there were still words left,
+                  // ellipsise the last line.
+                  const wordsConsumed = lines.join(" ").split(/\s+/).length;
+                  if (wordsConsumed < words.length) {
+                    const last = lines[lines.length - 1] ?? "";
+                    lines[lines.length - 1] =
+                      last.length + 1 > maxLineLen
+                        ? last.slice(0, maxLineLen - 1) + "…"
+                        : last + "…";
+                  }
+                  return lines.join("\n");
+                },
                 color: (node: any) => {
                   const cat = node?.properties?.category as Category | undefined;
                   return cat && CATEGORY_COLOR[cat]
@@ -230,24 +289,34 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
                     : "#888888";
                 },
                 title: (node: any) => {
-                  const p = node?.properties ?? {};
+                  // neovis passes the vis.js node object to function callbacks;
+                  // the Neo4j node properties live at node.raw.properties.
+                  // Fallback to node.properties for older neovis shapes.
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
                   const created = p.created_at
                     ? new Date(Number(p.created_at)).toLocaleString()
                     : "—";
                   const conf =
                     typeof p.confidence === "number"
                       ? p.confidence.toFixed(2)
-                      : String(p.confidence ?? "—");
-                  return [
-                    `<div style="font-family:system-ui;font-size:12px;color:#e0e0e0;background:#0e0e0e;padding:6px 8px;border-radius:4px;border:1px solid #2a2a2a;">`,
-                    `<b>${escapeHtml(String(p.title ?? p.id ?? "—"))}</b><br/>`,
-                    `category: ${escapeHtml(String(p.category ?? "—"))}<br/>`,
-                    `confidence: ${conf}<br/>`,
-                    `reinforcements: ${p.reinforcements ?? 0}<br/>`,
-                    `created: ${created}<br/>`,
-                    `pinned: ${p.pinned ? "★" : "no"}`,
-                    `</div>`,
+                      : p.confidence != null
+                      ? String(p.confidence)
+                      : "—";
+                  // vis-network requires a DOM Element for rich tooltips.
+                  // Returning an HTML string causes it to be rendered as
+                  // literal text (including the style attribute). We build
+                  // a detached <div> so the browser renders it properly.
+                  const el = document.createElement("div");
+                  el.style.cssText = "font-family:system-ui;font-size:12px;color:#e0e0e0;background:#111;padding:8px 10px;border-radius:6px;border:1px solid #333;min-width:160px;line-height:1.6;";
+                  el.innerHTML = [
+                    `<div style="font-weight:600;font-size:13px;margin-bottom:4px;color:#fff">${escapeHtml(String(p.title ?? p.id ?? "—"))}</div>`,
+                    `<div><span style="color:#888">category</span> <span style="color:#a78bfa">${escapeHtml(String(p.category ?? "—"))}</span></div>`,
+                    `<div><span style="color:#888">confidence</span> ${conf}</div>`,
+                    `<div><span style="color:#888">reinforcements</span> ${p.reinforcements ?? 0}</div>`,
+                    `<div><span style="color:#888">created</span> ${escapeHtml(created)}</div>`,
+                    `<div><span style="color:#888">pinned</span> ${p.pinned ? "<span style='color:#f59e0b'>★ yes</span>" : "no"}</div>`,
                   ].join("");
+                  return el;
                 },
                 size: (node: any) => {
                   const c = Number(node?.properties?.confidence ?? 0.5);
@@ -264,31 +333,131 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
         relationships: {
           MENTIONS: {
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
-              static: { arrows: { to: { enabled: true } }, color: { color: "#3b82f6" } },
+              static: {
+                label: "mentions",
+                arrows: { to: { enabled: true } },
+                color: { color: "#3b82f6" },
+                font: { size: 9, color: "#3b82f6", strokeWidth: 0, align: "middle" },
+              },
             },
           },
           REFERENCES: {
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
-              static: { arrows: { to: { enabled: true } }, color: { color: "#10b981" } },
+              static: {
+                label: "references",
+                arrows: { to: { enabled: true } },
+                color: { color: "#10b981" },
+                font: { size: 9, color: "#10b981", strokeWidth: 0, align: "middle" },
+              },
             },
           },
           CONTRADICTS: {
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
               static: {
+                label: "⚠ contradicts",
                 arrows: { to: { enabled: false }, from: { enabled: false } },
                 color: { color: "#ef4444" },
                 dashes: true,
+                font: { size: 9, color: "#ef4444", strokeWidth: 0, align: "middle" },
               },
             },
           },
           NEXT: {
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
-              static: { arrows: { to: { enabled: true } }, color: { color: "#ec4899" } },
+              static: {
+                label: "next",
+                arrows: { to: { enabled: true } },
+                color: { color: "#ec4899" },
+                font: { size: 9, color: "#ec4899", strokeWidth: 0, align: "middle" },
+              },
             },
           },
           ON_FAILURE: {
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
-              static: { arrows: { to: { enabled: true } }, color: { color: "#f59e0b" }, dashes: true },
+              static: {
+                label: "on failure",
+                arrows: { to: { enabled: true } },
+                color: { color: "#f59e0b" },
+                dashes: true,
+                font: { size: 9, color: "#f59e0b", strokeWidth: 0, align: "middle" },
+              },
+            },
+          },
+          // Real relationship types observed in the live store.
+          // RELATES_TO carries a `relation` property (reinforces | extends |
+          // example-of | depends-on) set by SemanticRelationLinker. We use
+          // a function callback to expose it as the edge label, with
+          // per-relation colour coding so the graph reads at a glance.
+          RELATES_TO: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                arrows: { to: { enabled: true, scaleFactor: 0.5 }, from: { enabled: false } },
+                font: { size: 10, strokeWidth: 3, strokeColor: "#0c0c0c", align: "middle" },
+              },
+              function: {
+                label: (edge: any) => {
+                  const rel = edge?.raw?.properties?.relation ?? edge?.properties?.relation;
+                  const labels: Record<string, string> = {
+                    "reinforces": "→ reinforces",
+                    "extends": "→ extends",
+                    "example-of": "→ example of",
+                    "depends-on": "→ depends on",
+                  };
+                  return labels[rel] ?? "→ relates";
+                },
+                color: (edge: any) => {
+                  const rel = edge?.raw?.properties?.relation ?? edge?.properties?.relation;
+                  // semantic palette: reinforces=green, extends=blue,
+                  // example-of=cyan, depends-on=amber, fallback=grey
+                  const colors: Record<string, string> = {
+                    "reinforces": "#10b981",
+                    "extends": "#3b82f6",
+                    "example-of": "#06b6d4",
+                    "depends-on": "#f59e0b",
+                  };
+                  return { color: colors[rel] ?? "#9ca3af" };
+                },
+              },
+            },
+          },
+          APPLIES_TO: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                label: "applies to",
+                arrows: { to: { enabled: true } },
+                color: { color: "#06b6d4" },
+                font: { size: 9, color: "#06b6d4", strokeWidth: 0, align: "middle" },
+              },
+            },
+          },
+          STARTS_AT: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                label: "starts at",
+                arrows: { to: { enabled: true } },
+                color: { color: "#22c55e" },
+                font: { size: 9, color: "#22c55e", strokeWidth: 0, align: "middle" },
+              },
+            },
+          },
+          ENDS_AT: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                label: "ends at",
+                arrows: { to: { enabled: true } },
+                color: { color: "#ef4444" },
+                font: { size: 9, color: "#ef4444", strokeWidth: 0, align: "middle" },
+              },
+            },
+          },
+          HAS_STEP: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                label: "has step",
+                arrows: { to: { enabled: true } },
+                color: { color: "#a855f7" },
+                font: { size: 9, color: "#a855f7", strokeWidth: 0, align: "middle" },
+              },
             },
           },
         },
@@ -401,22 +570,49 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
 
         <div style={styles.controlsRow}>
           <span style={styles.label}>categories</span>
-          {ALL_CATEGORIES.map((c) => (
-            <button
-              key={c}
-              style={{
-                ...styles.chip,
-                ...(filters.categories.has(c)
-                  ? { ...styles.chipActive, backgroundColor: CATEGORY_COLOR[c], borderColor: CATEGORY_COLOR[c] }
-                  : {}),
-              }}
-              onClick={() => toggleCategory(c)}
-              disabled={filters.onlyWorkflows}
-              title={filters.onlyWorkflows ? "Disabled in workflows-only mode" : undefined}
-            >
-              {c}
-            </button>
-          ))}
+          {ALL_CATEGORIES.map((c) => {
+            const active = filters.categories.has(c);
+            const color = CATEGORY_COLOR[c];
+            return (
+              <button
+                key={c}
+                style={{
+                  ...styles.chip,
+                  // Inactive: tinted border in category color (visible but muted).
+                  // Active: filled with category color.
+                  borderColor: color,
+                  ...(active
+                    ? {
+                        backgroundColor: color,
+                        color: "#fff",
+                        opacity: 1,
+                        borderColor: color,
+                      }
+                    : {
+                        backgroundColor: "transparent",
+                        color: color,
+                      }),
+                }}
+                onClick={() => toggleCategory(c)}
+                disabled={filters.onlyWorkflows}
+                title={filters.onlyWorkflows
+                  ? "Disabled in workflows-only mode"
+                  : (active ? `Click to hide ${c}` : `Click to filter to ${c}`)
+                }
+              >
+                <span style={{
+                  display: "inline-block",
+                  width: "8px",
+                  height: "8px",
+                  borderRadius: "50%",
+                  backgroundColor: color,
+                  border: active ? "1px solid #fff" : `1px solid ${color}`,
+                }} />
+                {c}
+                {active && <span style={{ marginLeft: "2px", fontSize: "10px", opacity: 0.85 }}>✓</span>}
+              </button>
+            );
+          })}
         </div>
 
         <div style={styles.controlsRow}>
@@ -570,8 +766,8 @@ const styles: Record<string, any> = {
     marginRight: "4px",
   },
   chip: {
-    padding: "3px 8px",
-    borderRadius: "10px",
+    padding: "3px 10px",
+    borderRadius: "12px",
     border: "1px solid #2a2a2a",
     backgroundColor: "#161616",
     color: "#bbb",
@@ -579,11 +775,17 @@ const styles: Record<string, any> = {
     cursor: "pointer",
     fontFamily: "inherit",
     outline: "none",
+    transition: "all 0.15s ease",
+    display: "inline-flex",
+    alignItems: "center",
+    gap: "5px",
+    opacity: 0.65,
   },
   chipActive: {
     backgroundColor: "#1d1828",
     borderColor: "#8b5cf6",
     color: "#fff",
+    opacity: 1,
   },
   select: {
     padding: "3px 8px",

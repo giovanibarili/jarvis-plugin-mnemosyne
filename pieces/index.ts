@@ -86,16 +86,31 @@ export function createPieces(ctx: PluginContext): Piece[] {
   // retriever.systemContext(sessionId) which bumps `reinforcements` for every
   // hit that lands in the block.
   if (typeof ctx.registerContextInjector === "function") {
-    const SESSION_EXCLUDE = /^actor-(rag|worker|delegate)-|mnemosyne-skip/;
+    const SESSION_EXCLUDE = /mnemosyne-skip/;
     // Per-session tracking:
-    //   lastInjectedBlock  — the block we last injected into the context for this session.
-    //                        If the new block is identical we skip injection entirely
-    //                        (the model already has it in its context window from the
-    //                        previous turn's ephemeral block — re-injecting is noise).
-    //   lastNotifiedBlock  — same dedup for the timeline notification (subset of above,
-    //                        kept separate so we can notify independently if needed later).
+    //   lastInjectedBlock     — full block string dedup (same block → skip)
+    //   lastNotifiedBlock     — same dedup for timeline notification
+    //   recentlyInjectedIds   — ring buffer (INJECTION_HISTORY_TURNS deep) of
+    //                           Sets of memory IDs injected on each turn.
+    //                           Memories already in this window are suppressed
+    //                           from re-injection — the model already has them
+    //                           in its context window from recent turns.
+    const INJECTION_HISTORY_TURNS = 15;
     const lastInjectedBlock = new Map<string, string>();
     const lastNotifiedBlock = new Map<string, string>();
+    const recentlyInjectedIds = new Map<string, string[][]>();
+
+    function recordInjectedIds(sid: string, ids: string[]): void {
+      const hist = recentlyInjectedIds.get(sid) ?? [];
+      hist.push(ids);
+      if (hist.length > INJECTION_HISTORY_TURNS) hist.shift();
+      recentlyInjectedIds.set(sid, hist);
+    }
+
+    function seenIds(sid: string): Set<string> {
+      const hist = recentlyInjectedIds.get(sid) ?? [];
+      return new Set(hist.flat());
+    }
 
     // When the context is compacted (Engine A or B), the conversation history is
     // replaced and the previous memory block is gone — reset so we reinject on the
@@ -105,6 +120,7 @@ export function createPieces(ctx: PluginContext): Piece[] {
         const sid = msg.target ?? "main";
         lastInjectedBlock.delete(sid);
         lastNotifiedBlock.delete(sid);
+        recentlyInjectedIds.delete(sid); // model lost context — start fresh
       }
     });
     ctx.registerContextInjector(async (sessionId: string): Promise<string[]> => {
@@ -157,6 +173,26 @@ export function createPieces(ctx: PluginContext): Piece[] {
       // previous turn's ephemeral block, so re-sending is pure noise and wastes
       // a cache breakpoint.
       if (block === lastInjectedBlock.get(sessionId)) return [];
+
+      // ── Per-memory dedup across recent turns ──────────────────────────────
+      // Filter out memories the model already received in the last
+      // INJECTION_HISTORY_TURNS turns. Only inject what's genuinely new.
+      // If ALL memories in the block are already known, skip entirely.
+      const lastHitsMap2 = (ready as unknown as { lastHits: Map<string, unknown[]> }).lastHits;
+      const currentHits = (lastHitsMap2?.get(sessionId) ?? []) as Array<{ memory: { id: string } }>;
+      const currentIds = currentHits.map((h) => h.memory.id);
+      const seen = seenIds(sessionId);
+      const newIds = currentIds.filter((id) => !seen.has(id));
+
+      if (currentIds.length > 0 && newIds.length === 0) {
+        // All memories in this block were already injected recently — suppress.
+        // Still record for the ring buffer so the window stays accurate.
+        recordInjectedIds(sessionId, currentIds);
+        return [];
+      }
+
+      // Record the full set injected this turn (new + carried) for future dedup.
+      recordInjectedIds(sessionId, currentIds);
       lastInjectedBlock.set(sessionId, block);
 
       // Surface the injection in the chat timeline only when the injected
@@ -164,23 +200,57 @@ export function createPieces(ctx: PluginContext): Piece[] {
       if (ctx.addChatTimelineEntry && block !== lastNotifiedBlock.get(sessionId)) {
         lastNotifiedBlock.set(sessionId, block);
         const lastHitsMap = (ready as unknown as { lastHits: Map<string, unknown[]> }).lastHits;
-        const lastHits = lastHitsMap?.get(sessionId) as Array<{ memory: { id: string; category: string; title: string; confidence: number; reinforcements: number } }> | undefined;
-        const memories = lastHits
-          ? lastHits.map((h) => ({
-              id: h.memory.id,
-              category: h.memory.category,
-              title: h.memory.title,
-              confidence: h.memory.confidence,
-              reinforcements: h.memory.reinforcements,
-            }))
-          : [];
+        // Full RetrievalHit shape — score, source, scoreBreakdown,
+        // conflicts_with already populated by retrieve()/rerank().
+        const lastHits = lastHitsMap?.get(sessionId) as Array<{
+          memory: { id: string; category: string; title: string; confidence: number; reinforcements: number };
+          score: number;
+          source: "vector" | "graph" | "workflow_lookup";
+          scoreBreakdown?: { recency: number; confidence: number; reinforcements: number; graphDistance: number; total: number };
+          conflicts_with?: string[];
+          vectorSim?: number;
+          matchSnippet?: { text: string; matchedTerms: string[]; source: "content" | "title" };
+        }> | undefined;
+        // Build the per-memory payload, then sort by vectorSim desc so the
+        // chat card shows the strongest semantic match at the top. Graph hits
+        // (no vectorSim) sink to the bottom — they were pulled by relation,
+        // not by direct query match, and that's the right reading order.
+        const memories = (lastHits ?? [])
+          .map((h) => ({
+            id: h.memory.id,
+            category: h.memory.category,
+            title: h.memory.title,
+            confidence: h.memory.confidence,
+            reinforcements: h.memory.reinforcements,
+            source: h.source,
+            score: h.score,
+            scoreBreakdown: h.scoreBreakdown,
+            conflicts: h.conflicts_with ?? [],
+            vectorSim: h.vectorSim,
+            matchSnippet: h.matchSnippet,
+          }))
+          .sort((a, b) => {
+            const av = a.vectorSim ?? -1;
+            const bv = b.vectorSim ?? -1;
+            return bv - av;
+          });
         const count = memories.length || block.split("\n").filter((l) => l.startsWith("**[")).length;
         const label = count === 1 ? "1 memory" : `${count} memories`;
+        // Aggregate source breakdown for the header (◆ vector:N · ◇ graph:N).
+        const sourceCounts = memories.reduce(
+          (acc, m) => {
+            if (m.source === "graph") acc.graph++;
+            else if (m.source === "workflow_lookup") acc.workflow++;
+            else acc.vector++;
+            return acc;
+          },
+          { vector: 0, graph: 0, workflow: 0 },
+        );
         ctx.addChatTimelineEntry(sessionId, {
           text: `🧠 Mnemosyne — injected ${label}`,
           rendererKind: "mnemosyne-memory-injection",
           renderer: { plugin: "jarvis-plugin-mnemosyne", file: "MemoryInjectionEntry" },
-          payload: { count, memories },
+          payload: { count, query: lastMsg, sourceCounts, memories },
         });
       }
 
@@ -319,6 +389,9 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     topK: config.retriever.top_k_vector,
     graphHops: config.retriever.graph_hops,
     workflowLookupEnabled: config.retriever.workflow_lookup_enabled,
+    // New since 0.5.x — drops "more-orthogonal-than-aligned" hits before
+    // they pollute context. Default 0.0; tune via config to be stricter.
+    minVectorSim: config.retriever.min_vector_sim ?? 0.0,
   }, relationLinker);
   const consolidator = new ConsolidatorPiece(store, conflictDetector, logger, {
     cron: config.consolidator.cron,

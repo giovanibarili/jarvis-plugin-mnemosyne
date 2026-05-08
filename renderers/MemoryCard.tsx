@@ -81,6 +81,22 @@ export default function MemoryCard({ memory, selected, onSelect, onPin, onDelete
             </span>
           ) : null}
           {promoted ? <span style={styles.layerBadge}>long</span> : <span style={styles.layerBadgeShort}>short</span>}
+          <div style={styles.actions} onClick={stop}>
+            <button
+              style={pinned ? { ...styles.iconBtn, color: "#fbbf24" } : styles.iconBtn}
+              onClick={(e: any) => { stop(e); onPin?.(memory.id, !pinned); }}
+              title={pinned ? "Unpin" : "Pin (immune to decay)"}
+            >
+              {pinned ? "★" : "☆"}
+            </button>
+            <button
+              style={styles.iconBtnDanger}
+              onClick={(e: any) => { stop(e); onDelete?.(memory.id); }}
+              title="Forget this memory"
+            >
+              🗑
+            </button>
+          </div>
         </div>
       </div>
 
@@ -104,22 +120,6 @@ export default function MemoryCard({ memory, selected, onSelect, onPin, onDelete
         </div>
       </div>
 
-      <div style={styles.actions} onClick={stop}>
-        <button
-          style={pinned ? { ...styles.iconBtn, color: "#fbbf24" } : styles.iconBtn}
-          onClick={(e: any) => { stop(e); onPin?.(memory.id, !pinned); }}
-          title={pinned ? "Unpin" : "Pin (immune to decay)"}
-        >
-          {pinned ? "★" : "☆"}
-        </button>
-        <button
-          style={styles.iconBtnDanger}
-          onClick={(e: any) => { stop(e); onDelete?.(memory.id); }}
-          title="Forget this memory"
-        >
-          🗑
-        </button>
-      </div>
     </div>
   );
 }
@@ -241,12 +241,10 @@ const styles: Record<string, any> = {
     flexShrink: 0,
   },
   actions: {
-    position: "absolute",
-    top: "6px",
-    right: "8px",
     display: "flex",
     gap: "2px",
     opacity: 0.65,
+    marginLeft: "4px",
   },
   iconBtn: {
     background: "transparent",

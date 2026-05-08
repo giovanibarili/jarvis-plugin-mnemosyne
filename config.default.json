@@ -11,7 +11,10 @@
       "workflow",
       "glossary"
     ],
-    "two_pass_enabled": true
+    "two_pass_enabled": true,
+    "relation_similarity_threshold": 0.82,
+    "relation_top_k": 8,
+    "context_window_size": 10
   },
   "workflow_detection": {
     "min_steps": 3,
@@ -21,11 +24,12 @@
   "retriever": {
     "top_k_vector": 5,
     "graph_hops": 1,
+    "min_vector_sim": 0.0,
     "rerank_weights": {
       "recency": 0.25,
-      "confidence": 0.30,
+      "confidence": 0.3,
       "reinforcements": 0.25,
-      "graph_distance": 0.20
+      "graph_distance": 0.2
     },
     "workflow_lookup_enabled": true,
     "default_visibility_filter": "open_or_same_session"

@@ -36,7 +36,20 @@ export class Reranker {
         confidence * this.weights.confidence +
         reinforcements * this.weights.reinforcements +
         graphDistance * this.weights.graph_distance;
-      return { ...hit, score };
+      // Persist component values so the chat-timeline injection card can
+      // explain WHY this memory ranked where it did. Cheap copy — these are
+      // already computed; we just stop discarding them.
+      return {
+        ...hit,
+        score,
+        scoreBreakdown: {
+          recency,
+          confidence,
+          reinforcements,
+          graphDistance,
+          total: score,
+        },
+      };
     });
     return scored.sort((a, b) => b.score - a.score);
   }

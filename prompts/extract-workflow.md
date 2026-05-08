@@ -24,4 +24,10 @@ Output JSON only:
   }
 }
 
-If no workflow with 3+ steps is identified, return {"is_workflow": false}.
+Rules:
+- Minimum 2 steps required (actors often execute focused sub-workflows).
+- Each step must be a concrete action, not a description.
+- If the turn shows an actor executing a repeatable sequence (e.g. fetch → validate → update → report), capture it even if partial.
+- Set confidence >= 0.7 only if the sequence is clearly intentional and repeatable.
+
+If no workflow with 2+ steps is identified, return {"is_workflow": false}.

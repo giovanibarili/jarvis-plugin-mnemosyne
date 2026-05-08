@@ -9,6 +9,7 @@ import type {
 import type { Extractor } from "../lib/extractor";
 import type { MnemosyneStore } from "../lib/store";
 import type { Logger } from "../lib/logger";
+import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
 
 /**
  * EncoderPiece — async sink for completed turns. Runs the two-pass extractor,
@@ -31,11 +32,41 @@ export class EncoderPiece implements Piece {
   private queue: TurnContext[] = [];
   private processing = false;
 
+  // ── Session-scoped counters (zeroed on boot, exposed via getStats) ─────
+  // We keep these locally instead of recomputing from the extraction.log
+  // every time the panel polls — the log can grow to thousands of entries
+  // and reading it on every 30s tick wastes IO. The log remains the source
+  // of truth for historical aggregates (skip-reason buckets, cost / day);
+  // these counters cover the "since boot" reading that the HUD shows live.
+  private _stats = {
+    turnsProcessed: 0,
+    turnsSkipped: 0,
+    turnsErrored: 0,
+    candidatesEmitted: 0,
+    memoriesWritten: 0,
+    memoriesDeduped: 0,
+    costUsd: 0,
+    categoriesCount: {} as Record<string, number>,
+  };
+
   constructor(
     private extractor: Extractor,
     private store: MnemosyneStore,
-    private logger: Logger
+    private logger: Logger,
+    private relationLinker?: SemanticRelationLinker
   ) {}
+
+  /** Snapshot of session-scoped encoder stats. Read-only — callers should
+   *  treat the returned object as immutable. We expose categoriesCount as a
+   *  shallow copy so consumers can iterate without races during increment. */
+  getStats() {
+    return {
+      ...this._stats,
+      queueDepth: this.queue.length,
+      processing: this.processing,
+      categoriesCount: { ...this._stats.categoriesCount },
+    };
+  }
 
   async start(_bus: EventBus): Promise<void> {
     // Encoder receives turns via direct call (Observer.onTurnComplete -> this.enqueue)
@@ -61,6 +92,7 @@ export class EncoderPiece implements Piece {
         try {
           await this.processTurn(turn);
         } catch (e) {
+          this._stats.turnsErrored++;
           await this.logger.logExtraction({
             turn_id: `${turn.session_id}-${turn.timestamp}`,
             pass: 1,
@@ -76,6 +108,33 @@ export class EncoderPiece implements Piece {
   private async processTurn(turn: TurnContext): Promise<void> {
     const turnId = `${turn.session_id}-${turn.timestamp}`;
     const result = await this.extractor.extract(turn);
+
+    // ── stats: every completed extraction counts as one turn processed.
+    // Skip vs success is determined by skip_reason presence, mirroring the
+    // log's pass=2 semantics. We tally categories from the triage output
+    // (not from emitted candidates) so the HUD reflects what the model SAW
+    // even when dedup later drops the candidate.
+    this._stats.turnsProcessed++;
+    this._stats.costUsd += result.costUsd ?? 0;
+    this._stats.candidatesEmitted += result.candidates.length;
+    if (result.triage.skip_reason) this._stats.turnsSkipped++;
+    for (const cat of result.triage.present ?? []) {
+      this._stats.categoriesCount[cat] = (this._stats.categoriesCount[cat] ?? 0) + 1;
+    }
+
+    // Audit: a turn that birthed a brand-new category gets its own log line so
+    // the operator can review what the model invented and prune if needed.
+    if (result.newPromptsGenerated?.length) {
+      await this.logger.logExtraction({
+        turn_id: turnId,
+        pass: 2,
+        categories: result.newPromptsGenerated,
+        candidates_emitted: 0,
+        confidence_avg: 0,
+        cost_usd: 0,
+        skip_reason: `new categories authored: ${result.newPromptsGenerated.join(", ")}`,
+      });
+    }
 
     await this.logger.logExtraction({
       turn_id: turnId,
@@ -93,8 +152,22 @@ export class EncoderPiece implements Piece {
     for (const cand of result.candidates) {
       const mem = this.candidateToMemory(cand, turn);
       // Dedup: same category + title + content already stored → skip
-      if (await this.exists(mem)) continue;
+      if (await this.exists(mem)) {
+        this._stats.memoriesDeduped++;
+        continue;
+      }
       await this.store.write(mem);
+      this._stats.memoriesWritten++;
+
+      // Pass 3 — Semantic relation linking.
+      // Runs after write so mem.id is stable and the Neo4j node exists.
+      // Fire-and-forget: errors are swallowed so a linker failure never
+      // blocks the encoder pipeline.
+      if (this.relationLinker) {
+        this.relationLinker.linkRelations(mem).catch((err) => {
+          console.error("[mnemosyne] semantic-relation-linker failed:", err);
+        });
+      }
     }
 
     if (result.workflow) {
@@ -119,7 +192,57 @@ export class EncoderPiece implements Piece {
     }
   }
 
+  /**
+   * Detect where the evidence signal came from within the turn.
+   *
+   * Priority:
+   *   1. tool  — evidence overlaps a tool result (file path, URL, bash output)
+   *   2. user  — evidence overlaps the user message (explicit statement)
+   *   3. assistant — fallback (inferred by the assistant)
+   *
+   * For tool origins we also extract the primary reference (path/URL) from args.
+   */
+  private detectOrigin(
+    evidence: string,
+    turn: TurnContext
+  ): Pick<Memory, "origin_source" | "origin_tool" | "origin_ref"> {
+    const ev = (evidence ?? "").toLowerCase();
+
+    // 1. Check tool results
+    for (const tc of turn.tool_calls ?? []) {
+      const result = JSON.stringify(tc.result ?? "").toLowerCase();
+      const args = tc.args ?? {};
+      // Evidence text appears in tool result → tool origin
+      const snippet = ev.slice(0, 80);
+      if (snippet && result.includes(snippet.toLowerCase())) {
+        const ref =
+          args.path ?? args.url ?? args.command ?? args.file_path ?? args.query ?? undefined;
+        return {
+          origin_source: "tool",
+          origin_tool: tc.tool,
+          origin_ref: typeof ref === "string" ? ref : undefined,
+        };
+      }
+    }
+
+    // 2. Evidence overlaps user message → user (highest trust)
+    const userMsg = (turn.user_message ?? "").toLowerCase();
+    if (ev && userMsg.includes(ev.slice(0, 60).toLowerCase())) {
+      return { origin_source: "user" };
+    }
+
+    // 3. Fallback — assistant inferred
+    return { origin_source: "assistant" };
+  }
+
   private candidateToMemory(cand: MemoryCandidate, turn: TurnContext): Memory {
+    const origin = this.detectOrigin(cand.evidence ?? "", turn);
+    // User-stated facts get a confidence boost (they are explicit, not inferred)
+    const confidence =
+      origin.origin_source === "user"
+        ? Math.min(1.0, cand.confidence + 0.05)
+        : cand.confidence;
+
     return {
       id: uuid(),
       category: cand.category,
@@ -127,7 +250,7 @@ export class EncoderPiece implements Piece {
       content: cand.content,
       tags: cand.tags,
       project: cand.project,
-      confidence: cand.confidence,
+      confidence,
       reinforcements: 0,
       visibility: cand.visibility,
       pinned: false,
@@ -136,11 +259,30 @@ export class EncoderPiece implements Piece {
       source_session: turn.session_id,
       promoted_at: null,
       evidence: cand.evidence,
+      ...origin,
     };
   }
 
   private async exists(mem: Memory): Promise<boolean> {
     const all = await this.store.markdownStore.list({ category: mem.category });
-    return all.some((m) => m.title === mem.title && m.content === mem.content);
+    // Exact match (fast path)
+    if (all.some((m) => m.title === mem.title && m.content === mem.content)) return true;
+    // Title-similarity match: same category + title within 1 edit-distance word
+    // (handles LLM paraphrasing the title slightly, e.g. bilingual separator differences)
+    const normalise = (s: string) => s.toLowerCase().replace(/[\\\/|]/g, "").replace(/\s+/g, " ").trim();
+    const newTitle = normalise(mem.title);
+    if (all.some((m) => normalise(m.title) === newTitle)) return true;
+    // Keyword overlap: if 3+ significant words from the new title appear in an existing
+    // title of the same category, treat as duplicate.
+    const keywords = newTitle.split(" ").filter((w) => w.length > 4);
+    if (keywords.length >= 2) {
+      const matches = all.filter((m) => {
+        const existing = normalise(m.title);
+        const hits = keywords.filter((k) => existing.includes(k)).length;
+        return hits >= Math.min(3, keywords.length);
+      });
+      if (matches.length > 0) return true;
+    }
+    return false;
   }
 }
