@@ -580,3 +580,70 @@ all Mnemosyne-injected content is confined to Block 1.
 **End of acceptance contract.** Treat any scenario failure as a v1.0 blocker. Open an issue
 referencing the scenario number, paste the failing log lines, and either fix or downgrade
 the release scope before tagging `v1.0.0`.
+
+---
+
+## v1.2 TRIPLET BDD scenarios
+
+These scenarios exercise the three-step pipeline (triage → classify → relate) introduced in v1.2. All scenarios assume `pipeline.v12_enabled: true` in JARVIS config.
+
+### Scenario T12-1: Triage skips a greeting
+
+**Given** MNEMO_PIPELINE_V12 is enabled
+**When** the user sends "Hi! How are you today?"
+**Then** the encoder logs `worth_extracting: false`
+**And** no memory is written to the store
+**And** the triage reason does not contain a category name
+
+### Scenario T12-2: Classify writes a preference memory
+
+**Given** MNEMO_PIPELINE_V12 is enabled
+**And** "preference" exists in the category catalog
+**When** the user sends "Eu prefiro Postgres em projetos novos"
+**Then** the encoder logs `worth_extracting: true`
+**And** a memory with `category: "preference"` is written
+**And** no new category is materialized
+
+### Scenario T12-3: New category — first occurrence triggers fallback
+
+**Given** MNEMO_PIPELINE_V12 is enabled
+**And** no pending category "ux-pattern" exists
+**When** the user sends a turn that classify proposes "ux-pattern" with confidence >= 0.7
+**Then** `~/.jarvis/mnemosyne/pending-categories.json` has "ux-pattern" with `occurrences: 1`
+**And** the persisted memory is in an EXISTING category (fallback applied)
+**And** `~/.jarvis/mnemosyne/categories/ux-pattern.md` is NOT created
+
+### Scenario T12-4: New category — second occurrence materializes it
+
+**Given** MNEMO_PIPELINE_V12 is enabled
+**And** `pending-categories.json` has "ux-pattern" with `occurrences: 1` and `last_seen_ts` within the last 7 days
+**When** the user sends another turn that classify proposes "ux-pattern" with confidence >= 0.7
+**Then** `~/.jarvis/mnemosyne/categories/ux-pattern.md` is created
+**And** the persisted memory has `category: "ux-pattern"`
+**And** "ux-pattern" no longer appears in `pending-categories.json`
+
+### Scenario T12-5: Intra-turn relate links two sibling memories
+
+**Given** MNEMO_PIPELINE_V12 is enabled
+**When** the user sends a turn that classify yields 2 candidates from different categories
+**Then** both memories are persisted
+**And** a Neo4j edge with `intra_turn: true` and a valid relation type links them
+**And** the relation is not "unrelated"
+
+### Scenario T12-6: Async relate piece links new memory to a neighbor
+
+**Given** MNEMO_PIPELINE_V12 is enabled
+**And** there is an existing memory C in the store
+**When** a new memory M is persisted that is semantically similar to C (similarity >= 0.55)
+**Then** within 5 seconds a Neo4j edge M→C is created
+**And** the edge relation is not "unrelated"
+**And** the edge carries a `reason` field
+
+### Scenario T12-7: Feature flag off keeps v1.1 path
+
+**Given** `pipeline.v12_enabled` is false (default)
+**When** the user sends any turn
+**Then** the encoder runs the v1.1 triage+extract code path
+**And** no v12 prompts are loaded
+**And** `pipeline_version` in extraction.log is absent or "1.1"
+**And** `~/.jarvis/mnemosyne/pending-categories.json` is not created or modified
