@@ -421,25 +421,52 @@ export class RetrieverPiece {
     const lines = ["## Mnemosyne — Relevant memories", ""];
     hits.forEach((hit) => {
       const m = hit.memory;
-      // Title line: **[category]** title · conf X.XX · reinf N
-      const conf = m.confidence != null ? m.confidence.toFixed(2) : "—";
-      lines.push(`**[${m.category}]** ${m.title}  ·  conf ${conf}  ·  reinf ${m.reinforcements}`);
+      const bd = hit.scoreBreakdown;
+
+      // Strength label based on rerank total score
+      const strength = hit.score >= 0.7 ? "HIGH" : hit.score >= 0.4 ? "MEDIUM" : "WEAK";
+
+      // Source tag
+      const sourceTag = hit.source === "graph" ? "◦ graph" : "● vector";
+
+      // sim + rerank
+      const simStr = hit.vectorSim != null ? `sim ${hit.vectorSim.toFixed(2)}` : null;
+      const rerankStr = `rerank ${hit.score.toFixed(2)}`;
+      const scores = [simStr, rerankStr].filter(Boolean).join("  ");
+
+      // Title line: source · strength · [category] title
+      lines.push(`${sourceTag}  ${strength}  [${m.category}]  ${m.title}`);
+
+      // Score line
+      lines.push(`  ${scores}  ·  conf ${m.confidence?.toFixed(2) ?? "—"}  ·  reinf ${m.reinforcements}`);
+
+      // Why: score breakdown components
+      if (bd) {
+        lines.push(`  why: recency ${bd.recency.toFixed(2)}  conf ${bd.confidence.toFixed(2)}  reinf ${bd.reinforcements.toFixed(2)}  graph ${bd.graphDistance.toFixed(1)}`);
+      }
+
+      // Match snippet (why this memory matched the query)
+      if (hit.matchSnippet?.matchedTerms?.length) {
+        lines.push(`  matched on \`${hit.matchSnippet.matchedTerms.join(", ")}\`: ${hit.matchSnippet.text.slice(0, 120)}`);
+      }
+
       // Content
       lines.push(`> ${m.content}`);
+
       // Conflicts
       if (hit.conflicts_with?.length) {
         const refs = hit.conflicts_with.map((c) => c.slice(0, 4)).join(", ");
         lines.push(`⚠️ Conflicts with: ${refs}`);
       }
+
       // v1.3 — inline graph neighborhood (parents ↑ / children ↓ with child count).
-      // Skipped when graph retrieval is disabled or this memory has no edges.
-      const neighborhood = hit.neighborhood
-        ? formatNeighborhood(hit.neighborhood)
-        : "";
+      const neighborhood = hit.neighborhood ? formatNeighborhood(hit.neighborhood) : "";
       if (neighborhood) lines.push(neighborhood);
+
       lines.push("");
     });
-    // v1.3 — closing nudge towards memory_fetch when any hit has relations.
+
+    // v1.3 — hint when any hit has relations
     const hint = buildHint(hits);
     if (hint) lines.push(hint);
     return lines.join("\n");
