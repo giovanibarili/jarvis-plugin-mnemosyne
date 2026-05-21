@@ -2,7 +2,31 @@ import type { Piece, EventBus } from "@jarvis/core";
 import type { MnemosyneStore } from "../lib/store";
 import type { ConflictDetector } from "../lib/conflict-detector";
 import type { Logger } from "../lib/logger";
+import type { LLMClient } from "../lib/extractor";
 import { shouldDecay, type DecayConfig } from "../lib/decay";
+import { PendingCategoriesStore } from "../lib/v12/pending-categories-store";
+import { CategoryCatalog } from "../lib/v12/category-catalog";
+import { CategoryMergeJudge } from "../lib/v12/category-merge-judge";
+
+/** v1.2 TRIPLET pipeline knobs (opt-in). When absent, the consolidator
+ * behaves exactly like v1.1: no pending-categories GC, no merge pass. */
+export interface ConsolidatorPipelineConfig {
+  v12_enabled: boolean;
+  /** Path to the pending-categories JSON store. */
+  pendingCategoriesPath: string;
+  /** Directory containing seed extractor prompts (extract-<id>.md). */
+  seedDir: string;
+  /** Directory containing dynamic category files (<id>.md). */
+  dynamicDir: string;
+  /** Path to the category-merge-judge prompt template. */
+  mergePromptPath: string;
+  /** LLM client used by the merge judge. */
+  llm: LLMClient;
+  /** Model to use for the merge judge (default: haiku). */
+  mergeModel?: string;
+  /** GC parameters for pending categories. */
+  pendingGc?: { maxAgeDays: number; minOccurrencesToKeep: number };
+}
 
 export interface ConsolidatorConfig {
   /** Cron expression — registered in pieces/index.ts (Task 12), not here */
@@ -16,6 +40,8 @@ export interface ConsolidatorConfig {
   /** Cosine similarity above which two short memories are considered duplicates */
   mergeSimilarityThreshold: number;
   decay: DecayConfig;
+  /** Optional v1.2 TRIPLET pipeline configuration. Disabled when omitted. */
+  pipeline?: ConsolidatorPipelineConfig;
 }
 
 export interface ConsolidationStats {
@@ -96,6 +122,21 @@ export class ConsolidatorPiece implements Piece {
     // 4. Decay (operates on remaining short-term)
     const decayed = await this.runDecay();
 
+    // 5. v1.2 TRIPLET — pending-categories GC + dynamic category merge pass
+    //    (log-only). Gated so vNext can be rolled out without disturbing v1.1
+    //    consolidation. Failures here are swallowed and logged — they MUST NOT
+    //    poison the core consolidation stats.
+    if (this.config.pipeline?.v12_enabled) {
+      try {
+        await this.runV12Pipeline();
+      } catch (e) {
+        await this.logger.logConsolidation({
+          event: "v12_pipeline_error",
+          error: String(e),
+        });
+      }
+    }
+
     const endSnapshot = await this.snapshot();
     const stats: ConsolidationStats = {
       promoted: promoted.length,
@@ -111,6 +152,71 @@ export class ConsolidatorPiece implements Piece {
     });
 
     return stats;
+  }
+
+  /** v1.2 TRIPLET pipeline: pending-categories GC and dynamic-category merge
+   * detection. Merge detection is currently log-only — actual memory migration
+   * lands in a follow-up task. */
+  private async runV12Pipeline(): Promise<void> {
+    const pipe = this.config.pipeline;
+    if (!pipe) return;
+
+    // 5a. Pending-categories GC
+    const pending = new PendingCategoriesStore(pipe.pendingCategoriesPath);
+    await pending.load();
+    const gcOpts = pipe.pendingGc ?? { maxAgeDays: 30, minOccurrencesToKeep: 2 };
+    const purged = pending.gc(gcOpts);
+    await pending.save();
+    if (purged.length > 0) {
+      await this.logger.logConsolidation({
+        event: "v12_pending_gc",
+        purged,
+        count: purged.length,
+      });
+    }
+
+    // 5b. Dynamic-category merge detection (log-only)
+    const catalog = new CategoryCatalog(pipe.seedDir, pipe.dynamicDir);
+    await catalog.load();
+    const dynamic = catalog.list().filter((c) => c.source === "dynamic");
+    if (dynamic.length < 2) return;
+
+    const judge = new CategoryMergeJudge(
+      pipe.llm,
+      pipe.mergePromptPath,
+      pipe.mergeModel ?? "haiku",
+    );
+
+    for (let i = 0; i < dynamic.length; i++) {
+      for (let j = i + 1; j < dynamic.length; j++) {
+        const a = dynamic[i];
+        const b = dynamic[j];
+        const verdict = await judge.judge(
+          {
+            id: a.id,
+            description: a.description,
+            hint: a.hint,
+            examples: a.examples ?? [],
+          },
+          {
+            id: b.id,
+            description: b.description,
+            hint: b.hint,
+            examples: b.examples ?? [],
+          },
+        );
+        if (verdict.should_merge) {
+          await this.logger.logConsolidation({
+            event: "v12_merge_proposed",
+            a: a.id,
+            b: b.id,
+            winner: verdict.winner,
+            loser: verdict.loser,
+            reason: verdict.reason,
+          });
+        }
+      }
+    }
   }
 
   /** Test/inspection hook — pretend the user has been idle for `min` minutes. */
