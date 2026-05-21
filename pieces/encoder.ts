@@ -230,6 +230,13 @@ export class EncoderPiece implements Piece {
         last_used: Date.now(),
       };
       await this.store.neo4j.upsertWorkflow(wf);
+      // Index in Chroma for semantic retrieval — best-effort, never blocks the save.
+      // ChromaAdapter may not have the method yet in older installs — skip silently
+      // when absent, but propagate genuine failures when the method exists.
+      const chromaUpsertWorkflow = (this.store.chroma as any).upsertWorkflow;
+      if (typeof chromaUpsertWorkflow === "function") {
+        await chromaUpsertWorkflow.call(this.store.chroma, wf);
+      }
     }
   }
 

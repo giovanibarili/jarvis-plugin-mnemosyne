@@ -691,3 +691,27 @@ All scenarios assume `graph_retrieval.enabled: true` in config.
 **Then** no neighborhood is attached to any RetrievalHit
 **And** no `↑`/`↓` lines appear in context injection
 **And** `memory_fetch` tool is not registered
+
+---
+
+## Workflow Chroma Retrieval BDD scenarios
+
+### Scenario TW-1: Workflow appears in injection when query matches trigger
+
+**Given** a workflow "ship-it" with trigger "implementation complete, ready to deliver" indexed in Chroma
+**When** the retriever receives query "ready to commit and push"
+**Then** the injected context includes a `📋 workflow` block
+**And** the block contains "ship-it", the trigger text, and `workflow_replay("ship-it")`
+
+### Scenario TW-2: Workflow not injected when similarity below threshold
+
+**Given** workflow "ship-it" indexed in Chroma
+**When** query has no semantic overlap (e.g. "what is the weather?")
+**Then** no `📋 workflow` block appears in the injected context
+
+### Scenario TW-3: Workflow indexed in Chroma when saved
+
+**Given** encoder processes a turn with a workflow candidate (≥2 steps, confidence ≥0.6)
+**When** `upsertWorkflow()` is called on Neo4j
+**Then** `chroma.upsertWorkflow()` is also called with name + trigger + outcome + steps summary
+**And** the workflow is retrievable via `queryWorkflows()`
