@@ -29,6 +29,39 @@ export function formatNeighborhood(n: MemoryNeighborhood): string {
 }
 
 /**
+ * Input shape for {@link formatWorkflowHit}. Decoupled from the Chroma
+ * `WorkflowQueryHit` so the formatter is a pure function over a minimal
+ * projection — easy to unit-test without touching the store.
+ */
+export interface WorkflowHitFormatInput {
+  id: string;
+  name: string;
+  trigger: string;
+  outcome: string;
+  stepCount: number;
+  similarity: number;
+}
+
+/**
+ * Render a single workflow hit as a compact, model-friendly block.
+ * Mirrors the memory hit rendering style (📋 prefix instead of ●/◦, no
+ * confidence/reinforcement line). When `similarity` is 0 the sim chip is
+ * dropped — used by callers that pass workflows without a vector score.
+ *
+ * Includes a `workflow_replay("<name>")` call-to-action so the model has
+ * an obvious way to execute the procedure.
+ */
+export function formatWorkflowHit(hit: WorkflowHitFormatInput): string {
+  const lines: string[] = [];
+  const simStr = hit.similarity > 0 ? `  sim ${hit.similarity.toFixed(2)}` : "";
+  lines.push(`📋 workflow  [workflow]  ${hit.name}${simStr}`);
+  lines.push(`  trigger: ${hit.trigger}`);
+  lines.push(`  outcome: ${hit.outcome}`);
+  lines.push(`  ${hit.stepCount} steps  →  use \`workflow_replay("${hit.name}")\` to execute`);
+  return lines.join("\n");
+}
+
+/**
  * Build the trailing hint that nudges the assistant towards `memory_fetch`
  * when at least one retrieved hit exposes related parents or children.
  * Returns "" when nothing in the block has relations — we don't want to
@@ -266,11 +299,11 @@ export class RetrieverPiece {
 
     this._stats.retrievals++;
     const query = this.buildQuery(sid);
-    const hits = await this.retrieve(query, sid);
+    const { hits, workflowHits } = await this.retrieve(query, sid);
     this._stats.hitsTotal += hits.length;
     if (hits.length > 0) this._stats.retrievalsWithHits++;
 
-    const block = this.format(hits);
+    const block = this.format(hits, workflowHits);
     this.cache.set(sid, { lastUserMsg: lastMsg, block });
     this.lastHits.set(sid, hits); // expose for injector timeline payload
 
@@ -315,7 +348,10 @@ export class RetrieverPiece {
     }
   }
 
-  private async retrieve(query: string, sessionId: string): Promise<RetrievalHit[]> {
+  private async retrieve(
+    query: string,
+    sessionId: string,
+  ): Promise<{ hits: RetrievalHit[]; workflowHits: string[] }> {
     // 1. Vector top-K from short + long
     const shortHits = await this.store.chroma.query("short", query, this.opts.topK);
     const longHits = await this.store.chroma.query("long", query, this.opts.topK);
@@ -398,7 +434,36 @@ export class RetrieverPiece {
         console.error("[mnemosyne] graph enrichment failed:", err);
       }
     }
-    return top;
+
+    // 7. Workflow retrieval. Query the dedicated mnemosyne_workflows
+    //    collection for procedures relevant to the current prompt and
+    //    pre-render them as strings. We threshold at sim ≥ 0.6 because
+    //    workflows are large, prescriptive blocks — false positives are
+    //    expensive in token budget. Best-effort: the collection may not
+    //    exist yet (fresh install) or the embed call may fail; either way
+    //    we degrade silently to "no workflows injected".
+    const workflowHits: string[] = [];
+    try {
+      const wfResults = await this.store.chroma.queryWorkflows(query, 3);
+      for (const w of wfResults) {
+        const similarity = 1 - w.distance;
+        if (similarity < 0.6) continue;
+        workflowHits.push(
+          formatWorkflowHit({
+            id: w.id,
+            name: (w.metadata.name as string) ?? w.id,
+            trigger: (w.metadata.trigger as string) ?? "",
+            outcome: (w.metadata.outcome as string) ?? "",
+            stepCount: (w.metadata.step_count as number) ?? 0,
+            similarity,
+          }),
+        );
+      }
+    } catch {
+      // mnemosyne_workflows collection may not exist yet — skip silently
+    }
+
+    return { hits: top, workflowHits };
   }
 
   /**
@@ -416,9 +481,12 @@ export class RetrieverPiece {
     }
   }
 
-  private format(hits: RetrievalHit[]): string {
-    if (!hits.length) return "";
-    const lines = ["## Mnemosyne — Relevant memories", ""];
+  private format(hits: RetrievalHit[], workflowHits: string[] = []): string {
+    if (!hits.length && !workflowHits.length) return "";
+    const lines: string[] = [];
+    if (hits.length) {
+      lines.push("## Mnemosyne — Relevant memories", "");
+    }
     hits.forEach((hit) => {
       const m = hit.memory;
       const bd = hit.scoreBreakdown;
@@ -465,6 +533,18 @@ export class RetrieverPiece {
 
       lines.push("");
     });
+
+    // Workflow section — appended after memories. Rendered with a divider
+    // so the model treats memories and procedures as distinct blocks.
+    if (workflowHits.length > 0) {
+      if (hits.length) lines.push("---");
+      lines.push("## Relevant workflows");
+      lines.push("");
+      for (const wh of workflowHits) {
+        lines.push(wh);
+        lines.push("");
+      }
+    }
 
     // v1.3 — hint when any hit has relations
     const hint = buildHint(hits);
