@@ -10,6 +10,22 @@ import type { Extractor } from "../lib/extractor";
 import type { MnemosyneStore } from "../lib/store";
 import type { Logger } from "../lib/logger";
 import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
+import type { EncoderV12, EncodedMemory } from "../lib/v12/encoder-v12";
+import type { RelatePiece } from "./relate";
+
+/**
+ * Optional v1.2 TRIPLET pipeline hook. When provided, `processTurn` delegates
+ * to `encoderV12.process` instead of running the v1.1 Extractor path. Each
+ * memory written by EncoderV12 is then handed off to `relatePiece` (if any)
+ * as an async fire-and-forget cross-store relate pass.
+ *
+ * Both fields are optional: v12.encoder alone runs the new triage/classify/
+ * gate pipeline; v12.relatePiece adds the cross-store judge step on top.
+ */
+export interface EncoderV12Hook {
+  encoder: EncoderV12;
+  relatePiece?: RelatePiece;
+}
 
 /**
  * EncoderPiece — async sink for completed turns. Runs the two-pass extractor,
@@ -53,8 +69,23 @@ export class EncoderPiece implements Piece {
     private extractor: Extractor,
     private store: MnemosyneStore,
     private logger: Logger,
-    private relationLinker?: SemanticRelationLinker
+    private relationLinker?: SemanticRelationLinker,
+    private v12?: EncoderV12Hook
   ) {}
+
+  /**
+   * Inject (or replace) the v1.2 pipeline hook after construction. Used by
+   * the bootstrap when the feature flag is on but EncoderPiece was already
+   * instantiated up the file. Calling with `undefined` falls back to v1.1.
+   */
+  setV12Hook(hook: EncoderV12Hook | undefined): void {
+    this.v12 = hook;
+  }
+
+  /** True when the v1.2 TRIPLET path will run for incoming turns. */
+  isV12Enabled(): boolean {
+    return this.v12?.encoder !== undefined;
+  }
 
   /** Snapshot of session-scoped encoder stats. Read-only — callers should
    *  treat the returned object as immutable. We expose categoriesCount as a
@@ -106,6 +137,16 @@ export class EncoderPiece implements Piece {
   }
 
   private async processTurn(turn: TurnContext): Promise<void> {
+    // v1.2 TRIPLET — delegate the full triage→classify→gate→relate pipeline
+    // to EncoderV12. v12 owns its own logging (extraction.log with
+    // pipeline_version=\"1.2\") and updates session-scoped counters via the
+    // sink callback. The v1.1 stats fields are still bumped so the HUD keeps
+    // working — they map cleanly onto v12's notion of \"turn processed\".
+    if (this.v12?.encoder) {
+      await this.processTurnV12(turn);
+      return;
+    }
+
     const turnId = `${turn.session_id}-${turn.timestamp}`;
     const result = await this.extractor.extract(turn);
 
@@ -189,6 +230,67 @@ export class EncoderPiece implements Piece {
         last_used: Date.now(),
       };
       await this.store.neo4j.upsertWorkflow(wf);
+    }
+  }
+
+  /**
+   * v1.2 TRIPLET path. Builds a single \"turn\" string from the user/assistant
+   * pair (matching how the v1.2 prompts are written — they expect a single
+   * conversational blob, not a structured turn object), then delegates to
+   * EncoderV12. After persistence, each materialised memory is forwarded to
+   * RelatePiece (if present) as a fire-and-forget cross-store relate pass.
+   *
+   * Stats: we bump the v1.1 session-scoped counters (turnsProcessed,
+   * memoriesWritten, ...) so the HUD shows live numbers regardless of which
+   * pipeline ran. v12's own extraction.log entries carry pipeline_version=\"1.2\"
+   * so historical reads remain unambiguous.
+   */
+  private async processTurnV12(turn: TurnContext): Promise<void> {
+    const v12 = this.v12!;
+    const turnId = `${turn.session_id}-${turn.timestamp}`;
+    // Build the conversational blob the v12 prompts expect. We include the
+    // assistant response because the triage prompt is trained on full
+    // exchanges; user-only would systematically under-trigger.
+    const turnText = [
+      turn.user_message ? `User: ${turn.user_message}` : "",
+      turn.assistant_response ? `Assistant: ${turn.assistant_response}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    const result = await v12.encoder.process(turnText, turnId);
+    this._stats.turnsProcessed++;
+    if (result.skipped) {
+      this._stats.turnsSkipped++;
+      return;
+    }
+    this._stats.memoriesWritten += result.memories.length;
+    this._stats.candidatesEmitted += result.memories.length;
+    for (const m of result.memories) {
+      this._stats.categoriesCount[m.category] =
+        (this._stats.categoriesCount[m.category] ?? 0) + 1;
+    }
+
+    // Cross-store relate (Step 4). Fire-and-forget — failures inside the
+    // judge must not block subsequent turns.
+    if (v12.relatePiece) {
+      const siblingIds = result.memories.map((m: EncodedMemory) => m.id);
+      for (const m of result.memories) {
+        v12.relatePiece
+          .handleNewMemory({
+            id: m.id,
+            title: m.title,
+            content: m.content,
+            evidence: m.evidence,
+            origin: m.origin_source,
+            createdAt: m.created_at,
+            category: m.category,
+            siblingIds,
+          })
+          .catch((err: unknown) => {
+            console.error("[mnemosyne] v12 relate-piece failed:", err);
+          });
+      }
     }
   }
 

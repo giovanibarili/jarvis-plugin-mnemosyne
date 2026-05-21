@@ -3,6 +3,7 @@ import { EventBus } from "@jarvis/core";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
+import { homedir } from "os";
 
 import { preflight, MnemosyneBootError } from "../lib/preflight.js";
 import { ChromaServer } from "../lib/chroma-server.js";
@@ -22,6 +23,13 @@ import { EncoderPiece } from "./encoder.js";
 import { RetrieverPiece } from "./retriever.js";
 import { ConsolidatorPiece } from "./consolidator.js";
 import { PanelPiece } from "./panel.js";
+import { RelatePiece } from "./relate.js";
+import { EncoderV12, type EncodedMemory } from "../lib/v12/encoder-v12.js";
+import { CategoryCatalog } from "../lib/v12/category-catalog.js";
+import { PendingCategoriesStore } from "../lib/v12/pending-categories-store.js";
+import { RelateJudge } from "../lib/v12/relate-judge.js";
+import { v4 as uuidv4 } from "uuid";
+import type { Memory } from "../lib/types.js";
 import {
   buildMemorySearchTool,
   buildMemoryGetTool,
@@ -406,6 +414,17 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // were created above in this same bootstrap function; safe to wire now.
   panel.setStatsSources(encoder, retriever);
 
+  // 7b. v1.2 TRIPLET pipeline — gated by pipeline.v12_enabled
+  // Defaults to false so v1.1 keeps running unchanged. When true, we build
+  // EncoderV12 (triage → classify → gate → intra-turn relate) and a
+  // RelatePiece (cross-store judge), then inject them into the existing
+  // EncoderPiece. EncoderPiece.processTurn delegates to v12 whenever the
+  // hook is set; the v1.1 Extractor path remains intact and is exercised
+  // by every existing test.
+  if (config?.pipeline?.v12_enabled === true) {
+    await wireV12Pipeline({ encoder, store, chroma, neo4j, llm, logger, config });
+  }
+
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
 
@@ -775,4 +794,165 @@ function registerTools(
   // Admin
   reg.register(buildMnemosyneConsolidateTool(consolidator));
   reg.register(buildMnemosyneStatsTool(store));
+}
+
+/* ---------------------------------------------------------------- v1.2 wiring */
+
+interface V12WireOpts {
+  encoder: EncoderPiece;
+  store: MnemosyneStore;
+  chroma: ChromaAdapter;
+  neo4j: Neo4jAdapter;
+  llm: LLMClient;
+  logger: Logger;
+  config: any;
+}
+
+/**
+ * Builds the v1.2 TRIPLET pipeline and wires it into the existing
+ * EncoderPiece. Side-effects only; no return value. Called from
+ * bootstrapAsync when `pipeline.v12_enabled === true`.
+ *
+ * Wiring:
+ *   - CategoryCatalog          ← seed prompts + dynamic categories dir
+ *   - PendingCategoriesStore   ← persists between-turn proposals
+ *   - EncoderV12               ← orchestrates triage/classify/gate/intra-turn
+ *   - EncoderV12 sink          ← maps EncodedMemory → Memory and calls
+ *                                MnemosyneStore.write (atomic md+chroma+neo4j)
+ *   - RelatePiece              ← cross-store judge step (chroma top-k → neo4j edge)
+ *   - encoder.setV12Hook       ← swaps EncoderPiece's processing path
+ */
+async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
+  const { encoder, store, chroma, neo4j, llm, logger, config } = opts;
+
+  // Resolve filesystem paths. Defaults mirror config.default.json but allow
+  // override via config + tilde-expansion. We expand ~/  only — anything more
+  // exotic is the operator's problem.
+  const expand = (p: string): string =>
+    p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
+
+  const categoriesDir = expand(
+    config?.categories_v12?.categories_dir ?? `${DATA_DIR}/categories/`
+  );
+  const pendingPath = expand(
+    config?.categories_v12?.pending_path ?? `${DATA_DIR}/pending-categories.json`
+  );
+  const promptsDir = join(__dirname, "../prompts");
+
+  // Ensure the categories dir exists before CategoryCatalog scans it —
+  // CategoryCatalog.load() will fail loud if the dir is missing entirely.
+  await fs.mkdir(categoriesDir, { recursive: true });
+
+  const catalog = new CategoryCatalog(promptsDir, categoriesDir);
+  await catalog.load();
+  const pending = new PendingCategoriesStore(pendingPath);
+  await pending.load();
+
+  // Sink: maps EncoderV12's EncodedMemory shape onto the canonical Memory
+  // shape and routes through MnemosyneStore for the atomic 3-layer write.
+  // We preserve the v12-assigned id so the cross-store relate step (which
+  // runs immediately after) can refer to the same memory.
+  const sink = {
+    async write(m: EncodedMemory): Promise<{ id: string }> {
+      const memory: Memory = {
+        id: m.id || uuidv4(),
+        category: m.category,
+        title: m.title,
+        content: m.content,
+        tags: m.tags ?? [],
+        project: null,
+        confidence: m.confidence,
+        reinforcements: 0,
+        visibility: "open",
+        pinned: false,
+        created_at: Date.parse(m.created_at) || Date.now(),
+        last_accessed: Date.now(),
+        source_session: m.session_id,
+        promoted_at: null,
+        evidence: m.evidence,
+        origin_source:
+          m.origin_source === "tool" || m.origin_source === "assistant"
+            ? m.origin_source
+            : "user",
+      };
+      await store.write(memory);
+      return { id: memory.id };
+    },
+  };
+
+  const encoderV12 = new EncoderV12({
+    llm,
+    catalog,
+    pending,
+    sink,
+    promptPaths: {
+      triage: join(promptsDir, "triage-v12.md"),
+      classify: join(promptsDir, "classify-v12.md"),
+      relate: join(promptsDir, "relate-judge-v12.md"),
+    },
+    classifyCfg: {
+      model: config?.classify_v12?.model ?? "haiku",
+      maxCandidates: config?.classify_v12?.max_candidates_per_turn ?? 5,
+    },
+    gateCfg: {
+      minConfidence: config?.categories_v12?.new_category_min_confidence ?? 0.7,
+      windowDays: config?.categories_v12?.new_category_recurrence_window_days ?? 7,
+      minOccurrences:
+        config?.categories_v12?.new_category_recurrence_min_occurrences ?? 2,
+    },
+    intraTurnCfg: {
+      maxPairs: config?.relate_v12?.intra_turn_max_pairs ?? 3,
+    },
+    model: config?.triage_v12?.model ?? "haiku",
+    logger,
+  });
+
+  // RelatePiece — optional. Only wired when relate_v12.enabled !== false to
+  // give operators an escape hatch (e.g. disable cross-store edges while
+  // tuning the judge prompt).
+  let relatePiece: RelatePiece | undefined;
+  if (config?.relate_v12?.enabled !== false) {
+    const judge = new RelateJudge(
+      llm,
+      join(promptsDir, "relate-judge-v12.md"),
+      config?.relate_v12?.model ?? "haiku"
+    );
+
+    relatePiece = new RelatePiece({
+      judge,
+      // Chroma adapter exposes per-layer query; v12 cares about the "short"
+      // layer (newly-written memories live there until consolidation
+      // promotes them). We map QueryHit → RelatePayload+id.
+      chromaQuery: async (m, topK, _threshold) => {
+        const hits = await chroma.query("short", m.content, topK);
+        return hits.map((h) => ({
+          id: h.id,
+          title: (h.metadata?.title as string) ?? "",
+          content: h.content,
+          evidence: (h.metadata?.evidence as string) ?? "",
+          origin: (h.metadata?.origin_source as string) ?? "assistant",
+          createdAt:
+            typeof h.metadata?.created_at === "number"
+              ? new Date(h.metadata.created_at as number).toISOString()
+              : ((h.metadata?.created_at as string) ?? new Date().toISOString()),
+          category: (h.metadata?.category as string) ?? "preference",
+        }));
+      },
+      neo4jWriteEdge: async (edge) => {
+        await neo4j.createRelatesToEdge(
+          edge.from,
+          edge.to,
+          edge.relation,
+          edge.confidence
+        );
+      },
+      cfg: {
+        topK: config?.relate_v12?.top_k ?? 20,
+        similarityThreshold: config?.relate_v12?.similarity_threshold ?? 0.55,
+        judgeCap: config?.relate_v12?.judge_cap_per_memory ?? 20,
+      },
+    });
+  }
+
+  encoder.setV12Hook({ encoder: encoderV12, relatePiece });
 }
