@@ -38,8 +38,8 @@ describe("v12 types", () => {
     expect(p.occurrences).toBe(1);
   });
 
-  it("RelateRelation enumerates 5 values", () => {
-    const values: RelateRelation[] = ["merge", "supersede", "relates_to", "contradicts", "unrelated"];
-    expect(values).toHaveLength(5);
+  it("RelateRelation enumerates 6 values", () => {
+    const values: RelateRelation[] = ["merge", "supersede", "relates_to", "relates_to_variant", "contradicts", "unrelated"];
+    expect(values).toHaveLength(6);
   });
 });
