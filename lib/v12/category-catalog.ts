@@ -39,8 +39,8 @@ export class CategoryCatalog {
     let files: string[];
     try {
       files = await fs.readdir(dir);
-    } catch (err: any) {
-      if (err.code === "ENOENT") return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
       throw err;
     }
     for (const f of files) {

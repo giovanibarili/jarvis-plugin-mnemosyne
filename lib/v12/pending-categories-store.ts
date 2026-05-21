@@ -13,8 +13,8 @@ export class PendingCategoriesStore {
     try {
       const raw = await fs.readFile(this.path, "utf8");
       this.data = JSON.parse(raw);
-    } catch (err: any) {
-      if (err.code === "ENOENT") {
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         this.data = {};
         return;
       }
