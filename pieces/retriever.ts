@@ -419,27 +419,27 @@ export class RetrieverPiece {
   private format(hits: RetrievalHit[]): string {
     if (!hits.length) return "";
     const lines = ["## Mnemosyne — Relevant memories", ""];
-    hits.forEach((hit, i) => {
+    hits.forEach((hit) => {
       const m = hit.memory;
-      lines.push(`${i + 1}. **[${m.category}]** ${m.title}`);
-      lines.push(`   ${m.content}`);
-      const created = new Date(m.created_at).toISOString().slice(0, 10);
-      const meta = `_ref: ${m.id.slice(0, 4)} • created: ${created} • reinforcements: ${m.reinforcements}_`;
-      lines.push(`   ${meta}`);
+      // Title line: **[category]** title · conf X.XX · reinf N
+      const conf = m.confidence != null ? m.confidence.toFixed(2) : "—";
+      lines.push(`**[${m.category}]** ${m.title}  ·  conf ${conf}  ·  reinf ${m.reinforcements}`);
+      // Content
+      lines.push(`> ${m.content}`);
+      // Conflicts
       if (hit.conflicts_with?.length) {
         const refs = hit.conflicts_with.map((c) => c.slice(0, 4)).join(", ");
-        lines.push(`   ⚠️ Conflicts with: ${refs}`);
+        lines.push(`⚠️ Conflicts with: ${refs}`);
       }
-      // v1.3 — inline graph neighborhood (parents ↑ / children ↓). Skipped
-      // when graph retrieval is disabled or this memory has no edges.
+      // v1.3 — inline graph neighborhood (parents ↑ / children ↓ with child count).
+      // Skipped when graph retrieval is disabled or this memory has no edges.
       const neighborhood = hit.neighborhood
         ? formatNeighborhood(hit.neighborhood)
         : "";
       if (neighborhood) lines.push(neighborhood);
       lines.push("");
     });
-    // v1.3 — closing nudge towards memory_fetch when any hit exposed
-    // related parents/children. Empty otherwise (parity with v1.2).
+    // v1.3 — closing nudge towards memory_fetch when any hit has relations.
     const hint = buildHint(hits);
     if (hint) lines.push(hint);
     return lines.join("\n");
