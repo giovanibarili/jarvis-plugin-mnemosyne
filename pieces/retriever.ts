@@ -1,9 +1,47 @@
 import type { EventBus, AIRequestMessage } from "@jarvis/core";
 import type { MnemosyneStore } from "../lib/store";
 import type { Reranker } from "../lib/reranker";
-import type { RetrievalHit } from "../lib/types";
+import type { RetrievalHit, MemoryNeighborhood } from "../lib/types";
 import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
 import { computeMatchSnippet } from "../lib/match-snippet.js";
+import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
+
+/**
+ * Render the parent/child neighborhood of a single memory as a short,
+ * indented markdown fragment. Used inline under each memory in the
+ * retrieval block. Returns "" when the neighborhood is empty (or absent),
+ * so callers can unconditionally concatenate.
+ *
+ * Parents are rendered with ↑ (this memory was relation-pointed-AT-by them),
+ * children with ↓ (this memory points OUT to them). Both formats are
+ * intentionally identical otherwise so the model parses them uniformly.
+ */
+export function formatNeighborhood(n: MemoryNeighborhood): string {
+  if (!n || (n.parents.length === 0 && n.children.length === 0)) return "";
+  const lines: string[] = [];
+  for (const p of n.parents) {
+    lines.push(`  ↑ ${p.id} [${p.category}] "${p.title}" — ${p.relation}  (${p.childCount} filhos)`);
+  }
+  for (const c of n.children) {
+    lines.push(`  ↓ ${c.id} [${c.category}] "${c.title}" — ${c.relation}  (${c.childCount} filhos)`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Build the trailing hint that nudges the assistant towards `memory_fetch`
+ * when at least one retrieved hit exposes related parents or children.
+ * Returns "" when nothing in the block has relations — we don't want to
+ * advertise a tool the user has no reason to call.
+ */
+export function buildHint(hits: RetrievalHit[]): string {
+  const hasRelations = hits.some(
+    (h) => h.neighborhood && (h.neighborhood.parents.length > 0 || h.neighborhood.children.length > 0)
+  );
+  return hasRelations
+    ? "\n_Se necessário explorar uma memória relacionada, use `memory_fetch(id)`._"
+    : "";
+}
 
 export interface RetrieverOptions {
   topK: number;
@@ -19,6 +57,18 @@ export interface RetrieverOptions {
    * Default 0.0 (parity with old behaviour minus the most obvious noise).
    */
   minVectorSim?: number;
+  /**
+   * v1.3 — graph retrieval enrichment. When enabled, each surviving
+   * retrieval hit gets a `neighborhood` payload (parents + children)
+   * attached via {@link GraphNeighborhoodService}. The block renders an
+   * inline list of related memories under each hit so the model can decide
+   * whether to call `memory_fetch(id)` for more depth.
+   */
+  graphRetrieval?: {
+    enabled: boolean;
+    maxParents?: number;
+    maxChildren?: number;
+  };
 }
 
 /**
@@ -99,12 +149,27 @@ export class RetrieverPiece {
     if (producedBlock) this._stats.injectionsWithBlock++;
   }
 
+  /**
+   * v1.3 — graph enrichment service. Constructed lazily in the ctor when
+   * `opts.graphRetrieval?.enabled === true`. When absent, `enrichHits` is a
+   * no-op and `format()` skips the neighborhood/hint blocks entirely
+   * (parity with v1.2 output).
+   */
+  private graphNeighborhood?: GraphNeighborhoodService;
+
   constructor(
     private store: MnemosyneStore,
     private reranker: Reranker,
     private opts: RetrieverOptions,
     private relationLinker?: SemanticRelationLinker,
-  ) {}
+  ) {
+    if (opts.graphRetrieval?.enabled) {
+      this.graphNeighborhood = new GraphNeighborhoodService(store.neo4j, {
+        maxParents: opts.graphRetrieval.maxParents ?? 10,
+        maxChildren: opts.graphRetrieval.maxChildren ?? 20,
+      });
+    }
+  }
 
   private _started = false;
   async start(bus: EventBus): Promise<void> {
@@ -322,7 +387,33 @@ export class RetrieverPiece {
     //    sorting/display so the user sees "best semantic match first" rather
     //    than "most-reinforced first".
     const reranked = this.reranker.rerank(memories);
-    return reranked.slice(0, this.opts.topK);
+    const top = reranked.slice(0, this.opts.topK);
+
+    // 6. v1.3 — attach graph neighborhood (parents + children) to each
+    //    surviving hit. Best-effort: a Neo4j hiccup must not break retrieval.
+    if (this.graphNeighborhood) {
+      try {
+        await this.enrichHits(top);
+      } catch (err) {
+        console.error("[mnemosyne] graph enrichment failed:", err);
+      }
+    }
+    return top;
+  }
+
+  /**
+   * v1.3 — attach a {@link MemoryNeighborhood} to every hit in-place.
+   * No-op when graph retrieval is disabled. Batched via `enrichBatch`
+   * so we issue a single Neo4j round-trip for the whole hit list.
+   */
+  private async enrichHits(hits: RetrievalHit[]): Promise<void> {
+    if (!this.graphNeighborhood) return;
+    const ids = hits.map((h) => h.memory.id);
+    const map = await this.graphNeighborhood.enrichBatch(ids);
+    for (const hit of hits) {
+      const n = map.get(hit.memory.id);
+      if (n) hit.neighborhood = n;
+    }
   }
 
   private format(hits: RetrievalHit[]): string {
@@ -339,8 +430,18 @@ export class RetrieverPiece {
         const refs = hit.conflicts_with.map((c) => c.slice(0, 4)).join(", ");
         lines.push(`   ⚠️ Conflicts with: ${refs}`);
       }
+      // v1.3 — inline graph neighborhood (parents ↑ / children ↓). Skipped
+      // when graph retrieval is disabled or this memory has no edges.
+      const neighborhood = hit.neighborhood
+        ? formatNeighborhood(hit.neighborhood)
+        : "";
+      if (neighborhood) lines.push(neighborhood);
       lines.push("");
     });
+    // v1.3 — closing nudge towards memory_fetch when any hit exposed
+    // related parents/children. Empty otherwise (parity with v1.2).
+    const hint = buildHint(hits);
+    if (hint) lines.push(hint);
     return lines.join("\n");
   }
 }
