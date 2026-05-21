@@ -109,7 +109,7 @@ interface Filters {
 }
 
 const DEFAULT_FILTERS: Filters = {
-  timeWindow: "7d",
+  timeWindow: "all",
   categories: new Set<Category>(),
   project: "all",
   onlyConflicts: false,
