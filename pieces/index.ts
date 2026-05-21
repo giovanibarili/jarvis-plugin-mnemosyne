@@ -52,6 +52,8 @@ import {
   buildMnemosyneConsolidateTool,
   buildMnemosyneStatsTool,
 } from "../lib/tools/admin-tools.js";
+import { buildMemoryFetchTool } from "../lib/tools/memory-fetch.js";
+import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
 
 // ESM equivalent of __dirname
 const __filename = fileURLToPath(import.meta.url);
@@ -429,7 +431,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   registerCron(ctx, config.consolidator.cron);
 
   // 9. Tool registration (Task 13)
-  registerTools(ctx, store, neo4j, consolidator, replayEngine, config.retriever.rerank_weights);
+  registerTools(ctx, store, neo4j, consolidator, replayEngine, config.retriever.rerank_weights, config);
 
   // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
   // The renderer fetches POST /plugins/jarvis-plugin-mnemosyne/{forget,pin,consolidate}.
@@ -769,7 +771,8 @@ function registerTools(
   neo4j: Neo4jAdapter,
   consolidator: ConsolidatorPiece,
   replay: ReplayEngine,
-  rerankWeights: RerankWeights
+  rerankWeights: RerankWeights,
+  config: any
 ): void {
   const reg = ctx.capabilityRegistry;
 
@@ -794,6 +797,22 @@ function registerTools(
   // Admin
   reg.register(buildMnemosyneConsolidateTool(consolidator));
   reg.register(buildMnemosyneStatsTool(store));
+
+  // v1.3 Graph Retrieval — memory_fetch tool (gated by config)
+  // t-4 wires graphNeighborhood at bootstrap level; until that lands, we
+  // instantiate a local service here so the tool stays self-contained.
+  // The adapter to MnemosyneStore exposes the minimal `get(id)` shape the
+  // tool expects (delegating to markdownStore.read).
+  if (config?.graph_retrieval?.enabled === true) {
+    const graphNeighborhood = new GraphNeighborhoodService(neo4j, {
+      maxParents: config?.graph_retrieval?.max_parents,
+      maxChildren: config?.graph_retrieval?.max_children,
+    });
+    const storeAdapter = {
+      get: (id: string) => store.markdownStore.read(id),
+    };
+    reg.register(buildMemoryFetchTool(storeAdapter, graphNeighborhood));
+  }
 }
 
 /* ---------------------------------------------------------------- v1.2 wiring */
