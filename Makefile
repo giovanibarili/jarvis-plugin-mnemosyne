@@ -1,4 +1,4 @@
-.PHONY: install test typecheck clean
+.PHONY: install test typecheck clean seed-v12
 
 # Wraps npm install with a clean registry override.
 # Required because the user-level shell exports `npm_config_registry` pointing
@@ -16,3 +16,6 @@ typecheck:
 
 clean:
 	@rm -rf node_modules dist
+
+seed-v12:
+	@unset npm_config_registry && npx --registry=https://registry.npmjs.org/ tsx scripts/seed-v12-catalog.ts
