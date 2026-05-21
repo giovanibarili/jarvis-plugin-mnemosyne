@@ -90,7 +90,7 @@
   "relate_v12": {
     "enabled": true,
     "model": "haiku",
-    "topK": 20,
+    "top_k": 20,
     "similarity_threshold": 0.55,
     "judge_cap_per_memory": 20,
     "intra_turn_max_pairs": 3,
