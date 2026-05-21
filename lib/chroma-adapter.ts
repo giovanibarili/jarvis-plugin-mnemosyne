@@ -1,6 +1,14 @@
 import { ChromaClient, Collection, IEmbeddingFunction, DefaultEmbeddingFunction } from "chromadb";
+import type { Workflow } from "./types.js";
 
 export type Layer = "short" | "long";
+
+export interface WorkflowQueryHit {
+  id: string;
+  distance: number;
+  content: string;
+  metadata: Record<string, unknown>;
+}
 
 export interface ChromaAdapterOptions {
   host: string;
@@ -60,6 +68,7 @@ export class ChromaAdapter {
   private embedFn: IEmbeddingFunction;
   private shortColl?: Collection;
   private longColl?: Collection;
+  private workflowColl?: Collection;
 
   constructor(opts: ChromaAdapterOptions) {
     this.client = new ChromaClient({ path: `http://${opts.host}:${opts.port}` });
@@ -127,5 +136,51 @@ export class ChromaAdapter {
 
   async count(layer: Layer): Promise<number> {
     return await this.getCollection(layer).count();
+  }
+
+  private async getWorkflowCollection(): Promise<Collection> {
+    if (!this.workflowColl) {
+      this.workflowColl = await this.client.getOrCreateCollection({
+        name: "mnemosyne_workflows",
+        embeddingFunction: this.embedFn,
+        metadata: { "hnsw:space": "cosine" },
+      });
+    }
+    return this.workflowColl;
+  }
+
+  async upsertWorkflow(wf: Workflow): Promise<void> {
+    const coll = await this.getWorkflowCollection();
+    const stepSummary = wf.steps.map((s, i) => `${i + 1}. ${s.action}`).join("; ");
+    const content = [wf.name, wf.description, wf.trigger, wf.outcome, stepSummary]
+      .filter(Boolean).join(" | ");
+    await coll.upsert({
+      ids: [wf.id],
+      documents: [content],
+      metadatas: [{
+        name: wf.name,
+        trigger: wf.trigger ?? "",
+        outcome: wf.outcome ?? "",
+        confidence: wf.confidence,
+        reinforcements: wf.reinforcements,
+        applies_to_project: wf.applies_to_project ?? "",
+        step_count: wf.steps.length,
+      }],
+    });
+  }
+
+  async queryWorkflows(queryText: string, k: number): Promise<WorkflowQueryHit[]> {
+    const coll = await this.getWorkflowCollection();
+    const result = await coll.query({ queryTexts: [queryText], nResults: k });
+    const ids = result.ids[0] ?? [];
+    const distances = result.distances?.[0] ?? [];
+    const documents = result.documents?.[0] ?? [];
+    const metadatas = result.metadatas?.[0] ?? [];
+    return ids.map((id, i) => ({
+      id,
+      distance: distances[i] ?? 1,
+      content: (documents[i] as string) ?? "",
+      metadata: (metadatas[i] as Record<string, unknown>) ?? {},
+    }));
   }
 }
