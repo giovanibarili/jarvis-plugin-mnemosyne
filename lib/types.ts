@@ -173,3 +173,56 @@ export interface RetrievalHit {
   /** Snippet of the memory content that overlaps the query (lexical overlap). */
   matchSnippet?: MatchSnippet;
 }
+
+// ---- v1.2 TRIPLET types ----
+
+export type TriageV12Result = {
+  worth_extracting: boolean;
+  reason: string;
+};
+
+export type ClassifiedCandidate = {
+  category: string;
+  is_new_category: boolean;
+  confidence: number;
+  title: string;
+  content: string;
+  evidence: string;
+  tags: string[];
+};
+
+export type NewCategoryProposal = {
+  id: string;
+  description: string;
+  hint: string;
+  extractor_template: string;
+};
+
+export type ClassifyV12Result = {
+  candidates: ClassifiedCandidate[];
+  new_categories: NewCategoryProposal[];
+};
+
+export type PendingCategory = {
+  slug: string;
+  description: string;
+  hint: string;
+  extractor_template: string;
+  occurrences: number;
+  first_seen_ts: string;
+  last_seen_ts: string;
+};
+
+export type RelateRelation =
+  | "merge"
+  | "supersede"
+  | "relates_to"
+  | "relates_to_variant"
+  | "contradicts"
+  | "unrelated";
+
+export type RelateJudgement = {
+  relation: RelateRelation;
+  confidence: number;
+  reason: string;
+};
