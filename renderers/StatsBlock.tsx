@@ -16,6 +16,8 @@
 
 import type { RuntimeStats } from "./types";
 
+const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
+
 interface Props {
   runtime: RuntimeStats | null | undefined;
   collapsed: boolean;
@@ -46,6 +48,10 @@ function fmtRelTime(iso: string | null): string {
   return `${Math.floor(hr / 24)}d ago`;
 }
 
+async function triggerRefresh(): Promise<void> {
+  await fetch(`${PLUGIN_BASE}/refresh`, { method: "POST" });
+}
+
 export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
   // Empty state: bootstrap may not have completed yet, or stats wiring is
   // disabled. We still render the toggle so the layout is stable.
@@ -55,6 +61,7 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
         <div style={styles.header} onClick={onToggle}>
           <span style={styles.headerTitle}>📊 Runtime stats</span>
           <span style={styles.headerHint}>(stats unavailable)</span>
+          <button style={styles.refreshBtn} onClick={(e: any) => { e.stopPropagation(); void triggerRefresh(); }} title="Refresh">↺</button>
         </div>
       </div>
     );
@@ -76,6 +83,7 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
       <div style={styles.header} onClick={onToggle}>
         <span style={styles.headerTitle}>📊 Runtime stats</span>
         <span style={styles.headerHint}>(since boot)</span>
+        <button style={styles.refreshBtn} onClick={(e: any) => { e.stopPropagation(); void triggerRefresh(); }} title="Refresh stats">↺</button>
         <span style={styles.headerToggle}>{collapsed ? "▸" : "▾"}</span>
       </div>
 
@@ -111,12 +119,13 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
             ) : null}
             <div style={styles.footer}>
               <span style={styles.footerHint}>{fmtCost(e.costUsd)} spent</span>
-              {e.queueDepth > 0 ? (
-                <span style={styles.footerBadge}>queue: {e.queueDepth}</span>
-              ) : null}
-              {e.processing ? (
-                <span style={{ ...styles.footerBadge, color: "#10b981" }}>● processing</span>
-              ) : null}
+              <span style={styles.footerBadge}>queue: {e.queueDepth}</span>
+              <span style={{
+                ...styles.footerBadge,
+                color: e.processing ? "#10b981" : "#555",
+              }}>
+                {e.processing ? "● processing" : "○ idle"}
+              </span>
             </div>
           </div>
 
@@ -247,6 +256,16 @@ const styles: Record<string, any> = {
   headerToggle: {
     fontSize: "11px",
     color: "#666",
+  },
+  refreshBtn: {
+    background: "none",
+    border: "none",
+    color: "#555",
+    cursor: "pointer",
+    fontSize: "13px",
+    padding: "0 2px",
+    lineHeight: 1,
+    marginLeft: "auto",
   },
   grid: {
     display: "grid",

@@ -11,39 +11,37 @@ import type { TurnContext } from "../types.js";
  */
 export function buildMnemosyneTriageTool(encoder: EncoderPiece): CapabilityDefinition {
   return {
-    definition: {
-      name: "mnemosyne_triage",
-      description:
-        "Send a prompt through the full Mnemosyne extraction pipeline " +
-        "(triage → classify → gate → store). Use to force-encode an insight, " +
-        "decision, or piece of knowledge that should be remembered. " +
-        "The text is treated as a synthetic turn: user_message = prompt, " +
-        "assistant_response = '' unless you provide one. " +
-        "Returns immediately — extraction runs asynchronously in the encoder queue.",
-      input_schema: {
-        type: "object",
-        properties: {
-          prompt: {
-            type: "string",
-            description:
-              "The text to triage. Write it as if it were the user's message " +
-              "in a conversation — clear, specific, in the language you want the " +
-              "memory stored in. Include context so the extractor can classify correctly.",
-          },
-          assistant_response: {
-            type: "string",
-            description:
-              "Optional assistant-side context for this synthetic turn. " +
-              "Leave empty if the content is self-contained.",
-          },
-          session_id: {
-            type: "string",
-            description:
-              "Session to attribute this triage to. Defaults to 'manual-triage'.",
-          },
+    name: "mnemosyne_triage",
+    description:
+      "Send a prompt through the full Mnemosyne extraction pipeline " +
+      "(triage → classify → gate → store). Use to force-encode an insight, " +
+      "decision, or piece of knowledge that should be remembered. " +
+      "The text is treated as a synthetic turn: user_message = prompt, " +
+      "assistant_response = '' unless you provide one. " +
+      "Returns immediately — extraction runs asynchronously in the encoder queue.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: {
+          type: "string",
+          description:
+            "The text to triage. Write it as if it were the user's message " +
+            "in a conversation — clear, specific, in the language you want the " +
+            "memory stored in. Include context so the extractor can classify correctly.",
         },
-        required: ["prompt"],
+        assistant_response: {
+          type: "string",
+          description:
+            "Optional assistant-side context for this synthetic turn. " +
+            "Leave empty if the content is self-contained.",
+        },
+        session_id: {
+          type: "string",
+          description:
+            "Session to attribute this triage to. Defaults to 'manual-triage'.",
+        },
       },
+      required: ["prompt"],
     },
     handler: async (args: Record<string, unknown>, meta?: { sessionId?: string }) => {
       const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";

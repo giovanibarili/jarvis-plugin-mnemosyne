@@ -548,6 +548,16 @@ function registerHttpRoutes(
     }
   });
 
+  // POST /refresh — force an immediate panel refresh (stats + memories)
+  ctx.registerRoute("POST", `${base}/refresh`, async (_req: any, res: any) => {
+    try {
+      await panel.refreshNow();
+      jsonResponse(res, 200, { ok: true });
+    } catch (e) {
+      jsonResponse(res, 500, { ok: false, error: String(e) });
+    }
+  });
+
   // GET /prompts — list all extract-*.md and triage.md files with content
   ctx.registerRoute("GET", `${base}/prompts`, async (_req: any, res: any) => {
     try {
