@@ -20,11 +20,19 @@ export interface EncoderV12Sink {
   write(memory: EncodedMemory): Promise<{ id: string }>;
 }
 
+export interface PipelineSpend {
+  triage: number;
+  classify: number;
+  relate: number;
+  total: number;
+}
+
 export interface EncoderV12Result {
   skipped: boolean;
   skipReason?: string;
   memories: EncodedMemory[];
   intraTurnEdges: IntraTurnEdge[];
+  spend: PipelineSpend;
 }
 
 export interface EncoderV12Opts {
@@ -63,6 +71,8 @@ export class EncoderV12 {
   async process(turn: string, sessionId: string): Promise<EncoderV12Result> {
     // Step 1: Triage
     const triage = await this.triage.evaluate(turn);
+    const triageCost = triage.costUsd ?? 0;
+
     if (!triage.worth_extracting) {
       await this.opts.logger?.logExtraction({
         turn_id: sessionId,
@@ -75,7 +85,7 @@ export class EncoderV12 {
         materialized: [],
         intra_turn_edges: 0,
         confidence_avg: 0,
-        cost_usd: 0,
+        cost_usd: triageCost,
         skip_reason: triage.reason,
       });
       return {
@@ -83,11 +93,13 @@ export class EncoderV12 {
         skipReason: triage.reason,
         memories: [],
         intraTurnEdges: [],
+        spend: { triage: triageCost, classify: 0, relate: 0, total: triageCost },
       };
     }
 
     // Step 2: Classify
     const classified = await this.classify.run(turn, triage.reason);
+    const classifyCost = classified.costUsd ?? 0;
 
     // Step 2b: Gate each candidate
     const finalCandidates: ClassifiedCandidate[] = [];
@@ -110,6 +122,7 @@ export class EncoderV12 {
     }
 
     if (finalCandidates.length === 0) {
+      const totalCost = triageCost + classifyCost;
       await this.opts.logger?.logExtraction({
         turn_id: sessionId,
         pass: 2,
@@ -121,7 +134,7 @@ export class EncoderV12 {
         materialized: materializedSlugs,
         intra_turn_edges: 0,
         confidence_avg: 0,
-        cost_usd: 0,
+        cost_usd: totalCost,
         skip_reason: "all_candidates_dropped",
       });
       return {
@@ -129,6 +142,7 @@ export class EncoderV12 {
         skipReason: "all_candidates_dropped",
         memories: [],
         intraTurnEdges: [],
+        spend: { triage: triageCost, classify: classifyCost, relate: 0, total: totalCost },
       };
     }
 
@@ -147,7 +161,7 @@ export class EncoderV12 {
       memories.push({ ...draft, id: written.id });
     }
 
-    // Step 3b: Intra-turn relate
+    // Step 3b: Intra-turn relate (cost tracked by relate-judge internally)
     const nodes: MemoryNode[] = memories.map((m) => ({
       id: m.id,
       title: m.title,
@@ -158,8 +172,11 @@ export class EncoderV12 {
       category: m.category,
     }));
     const intraTurnEdges = await this.intraTurn.relate(nodes);
+    const relateCost = (this.intraTurn as any).lastCostUsd ?? 0;
 
-    const result: EncoderV12Result = { skipped: false, memories, intraTurnEdges };
+    const totalCost = triageCost + classifyCost + relateCost;
+    const spend: PipelineSpend = { triage: triageCost, classify: classifyCost, relate: relateCost, total: totalCost };
+    const result: EncoderV12Result = { skipped: false, memories, intraTurnEdges, spend };
 
     await this.opts.logger?.logExtraction({
       turn_id: sessionId,
@@ -175,7 +192,7 @@ export class EncoderV12 {
         result.memories.length > 0
           ? result.memories.reduce((s, m) => s + m.confidence, 0) / result.memories.length
           : 0,
-      cost_usd: 0,
+      cost_usd: totalCost,
       skip_reason: null,
     });
 

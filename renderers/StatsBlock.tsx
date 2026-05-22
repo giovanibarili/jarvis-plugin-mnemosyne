@@ -14,7 +14,7 @@
 //
 // React (createElement) is supplied by the esbuild banner — see globals.d.ts.
 
-import type { RuntimeStats } from "./types";
+import type { RuntimeStats, PipelineStepStats } from "./types";
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
 
@@ -119,15 +119,27 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
                 <span style={styles.metricLabel}>errors</span>
               </div>
             ) : null}
+            {/* Pipeline spend + queue per step */}
+            {e.pipeline ? (
+              <div style={styles.pipelineBlock}>
+                <PipelineRow step="triage"   stats={e.pipeline.triage}   queue={e.processing ? e.queueDepth : 0} />
+                <PipelineRow step="classify" stats={e.pipeline.classify} queue={0} />
+                <PipelineRow step="relate"   stats={e.pipeline.relate}   queue={0} />
+              </div>
+            ) : null}
             <div style={styles.footer}>
-              <span style={styles.footerHint}>{fmtCost(e.costUsd)} spent</span>
-              <span style={styles.footerBadge}>queue: {e.queueDepth}</span>
+              <span style={styles.footerHint}>{fmtCost(e.costUsd)} total</span>
               <span style={{
                 ...styles.footerBadge,
                 color: e.processing ? "#10b981" : "#555",
               }}>
                 {e.processing ? "● processing" : "○ idle"}
               </span>
+              {e.queueDepth > 0 ? (
+                <span style={{ ...styles.footerBadge, color: "#f59e0b" }}>
+                  queue: {e.queueDepth}
+                </span>
+              ) : null}
             </div>
           </div>
 
@@ -207,6 +219,19 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
             </div>
           </div>
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PipelineRow({ step, stats, queue }: { step: string; stats: PipelineStepStats; queue: number }) {
+  return (
+    <div style={styles.pipelineRow}>
+      <span style={styles.pipelineStep}>{step}</span>
+      <span style={styles.pipelineCalls}>{stats.calls}×</span>
+      <span style={styles.pipelineCost}>{fmtCost(stats.costUsd)}</span>
+      {queue > 0 ? (
+        <span style={styles.pipelineQueue}>q:{queue}</span>
       ) : null}
     </div>
   );
@@ -348,6 +373,42 @@ const styles: Record<string, any> = {
     color: "#555",
     fontStyle: "italic",
     padding: "4px 0",
+  },
+  pipelineBlock: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+    marginTop: "6px",
+    paddingTop: "6px",
+    borderTop: "1px dashed #232323",
+  },
+  pipelineRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    fontSize: "10px",
+  },
+  pipelineStep: {
+    color: "#666",
+    width: "48px",
+    flexShrink: 0,
+  },
+  pipelineCalls: {
+    color: "#888",
+    width: "24px",
+    textAlign: "right" as const,
+    fontVariantNumeric: "tabular-nums",
+    flexShrink: 0,
+  },
+  pipelineCost: {
+    color: "#10b981",
+    fontVariantNumeric: "tabular-nums",
+    flex: 1,
+  },
+  pipelineQueue: {
+    color: "#f59e0b",
+    fontVariantNumeric: "tabular-nums",
+    flexShrink: 0,
   },
   bucketRow: {
     display: "flex",

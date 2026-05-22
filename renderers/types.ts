@@ -85,6 +85,11 @@ export interface PreflightFailure {
 /** Runtime metrics block produced by lib/stats.ts. Optional in PanelData
  *  because older builds and degraded states (bootstrap-failure path) don't
  *  populate it. */
+export interface PipelineStepStats {
+  calls: number;
+  costUsd: number;
+}
+
 export interface RuntimeStats {
   encoder: {
     turnsProcessed: number;
@@ -97,6 +102,11 @@ export interface RuntimeStats {
     queueDepth: number;
     processing: boolean;
     categoriesCount: Record<string, number>;
+    pipeline: {
+      triage:   PipelineStepStats;
+      classify: PipelineStepStats;
+      relate:   PipelineStepStats;
+    };
   };
   retriever: {
     retrievals: number;

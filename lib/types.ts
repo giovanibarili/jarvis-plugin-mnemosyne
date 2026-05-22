@@ -195,6 +195,7 @@ export interface RetrievalHit {
 export type TriageV12Result = {
   worth_extracting: boolean;
   reason: string;
+  costUsd: number;
 };
 
 export type ClassifiedCandidate = {
@@ -217,6 +218,7 @@ export type NewCategoryProposal = {
 export type ClassifyV12Result = {
   candidates: ClassifiedCandidate[];
   new_categories: NewCategoryProposal[];
+  costUsd: number;
 };
 
 export type PendingCategory = {

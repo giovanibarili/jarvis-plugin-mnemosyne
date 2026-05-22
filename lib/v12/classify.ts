@@ -24,15 +24,18 @@ export class ClassifyV12 {
       .replace("{{TURN}}", turn);
 
     let raw: string;
+    let costUsd = 0;
     try {
-      raw = await this.llm.call({
+      const res = await this.llm.call({
         system: "You are a JSON-only classifier. Output one JSON object.",
         user,
         maxTokens: 2000,
         model: this.model,
       });
+      raw = (res as any).text ?? res;
+      costUsd = (res as any).costUsd ?? 0;
     } catch {
-      return { candidates: [], new_categories: [] };
+      return { candidates: [], new_categories: [], costUsd: 0 };
     }
 
     let parsed: any;
@@ -41,12 +44,12 @@ export class ClassifyV12 {
       if (!m) throw new Error("no JSON");
       parsed = JSON.parse(m[0]);
     } catch {
-      return { candidates: [], new_categories: [] };
+      return { candidates: [], new_categories: [], costUsd };
     }
 
     const candidates = sanitizeCandidates(parsed.candidates, this.maxCandidates);
     const new_categories = sanitizeNewCategories(parsed.new_categories, this.catalog);
-    return { candidates, new_categories };
+    return { candidates, new_categories, costUsd };
   }
 
   private async loadPrompt(): Promise<string> {

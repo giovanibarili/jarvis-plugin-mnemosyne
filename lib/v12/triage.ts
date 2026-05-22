@@ -15,27 +15,31 @@ export class TriageV12 {
     const prompt = await this.loadPrompt();
     const user = prompt.replace("{{TURN}}", turn);
     let raw: string;
+    let costUsd = 0;
     try {
-      raw = await this.llm.call({
+      const res = await this.llm.call({
         system: "You are a JSON-only assistant. Output exactly one JSON object.",
         user,
         maxTokens: 200,
         model: this.model,
       });
+      raw = (res as any).text ?? res;
+      costUsd = (res as any).costUsd ?? 0;
     } catch (err: any) {
-      return { worth_extracting: false, reason: `llm_error: ${err.message ?? err}` };
+      return { worth_extracting: false, reason: `llm_error: ${err.message ?? err}`, costUsd: 0 };
     }
     try {
       const parsed = JSON.parse(extractJson(raw));
       if (typeof parsed.worth_extracting !== "boolean") {
-        return { worth_extracting: false, reason: "parse_error: missing worth_extracting" };
+        return { worth_extracting: false, reason: "parse_error: missing worth_extracting", costUsd };
       }
       return {
         worth_extracting: parsed.worth_extracting,
         reason: typeof parsed.reason === "string" ? parsed.reason : "",
+        costUsd,
       };
     } catch (err: any) {
-      return { worth_extracting: false, reason: `parse_error: ${err.message ?? err}` };
+      return { worth_extracting: false, reason: `parse_error: ${err.message ?? err}`, costUsd };
     }
   }
 

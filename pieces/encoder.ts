@@ -34,6 +34,11 @@ export class EncoderPiece implements Piece {
     memoriesDeduped: 0,
     costUsd: 0,
     categoriesCount: {} as Record<string, number>,
+    pipeline: {
+      triage:   { calls: 0, costUsd: 0 },
+      classify: { calls: 0, costUsd: 0 },
+      relate:   { calls: 0, costUsd: 0 },
+    },
   };
 
   constructor(
@@ -52,6 +57,11 @@ export class EncoderPiece implements Piece {
       queueDepth: this.queue.length,
       processing: this.processing,
       categoriesCount: { ...this._stats.categoriesCount },
+      pipeline: {
+        triage:   { ...this._stats.pipeline.triage },
+        classify: { ...this._stats.pipeline.classify },
+        relate:   { ...this._stats.pipeline.relate },
+      },
     };
   }
 
@@ -173,6 +183,22 @@ export class EncoderPiece implements Piece {
 
     const result = await this.v12.encoder.process(turnText, turnId);
     this._stats.turnsProcessed++;
+
+    // Accumulate per-step spend
+    const spend = result.spend;
+    if (spend) {
+      this._stats.costUsd += spend.total;
+      this._stats.pipeline.triage.calls++;
+      this._stats.pipeline.triage.costUsd += spend.triage;
+      if (spend.classify > 0 || !result.skipped) {
+        this._stats.pipeline.classify.calls++;
+        this._stats.pipeline.classify.costUsd += spend.classify;
+      }
+      if (spend.relate > 0) {
+        this._stats.pipeline.relate.calls++;
+        this._stats.pipeline.relate.costUsd += spend.relate;
+      }
+    }
 
     if (result.skipped) {
       this._stats.turnsSkipped++;
