@@ -80,11 +80,13 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
 
   return (
     <div style={styles.wrap}>
-      <div style={styles.header} onClick={onToggle}>
-        <span style={styles.headerTitle}>📊 Runtime stats</span>
-        <span style={styles.headerHint}>(since boot)</span>
+      <div style={styles.header}>
+        <div style={styles.headerLeft} onClick={onToggle}>
+          <span style={styles.headerTitle}>📊 Runtime stats</span>
+          <span style={styles.headerHint}>(since boot)</span>
+          <span style={styles.headerToggle}>{collapsed ? "▸" : "▾"}</span>
+        </div>
         <button style={styles.refreshBtn} onClick={(e: any) => { e.stopPropagation(); void triggerRefresh(); }} title="Refresh stats">↺</button>
-        <span style={styles.headerToggle}>{collapsed ? "▸" : "▾"}</span>
       </div>
 
       {!collapsed ? (
@@ -236,12 +238,17 @@ const styles: Record<string, any> = {
   header: {
     display: "flex",
     alignItems: "center",
-    gap: "6px",
     padding: "6px 10px",
-    cursor: "pointer",
     backgroundColor: "#181818",
     borderBottom: "1px solid #222",
     userSelect: "none",
+  },
+  headerLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    flex: 1,
+    cursor: "pointer",
   },
   headerTitle: {
     fontSize: "12px",
@@ -263,13 +270,13 @@ const styles: Record<string, any> = {
     color: "#555",
     cursor: "pointer",
     fontSize: "13px",
-    padding: "0 2px",
+    padding: "0 0 0 8px",
     lineHeight: 1,
-    marginLeft: "auto",
+    flexShrink: 0,
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
     gap: "8px",
     padding: "10px",
   },
