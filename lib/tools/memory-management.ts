@@ -231,6 +231,20 @@ export function buildMemoryPromoteTool(
       const mem = await resolveMemoryId(store, args.id);
       if (!mem) return { error: "not found" };
       if (mem.promoted_at) {
+        // Still trigger relate — memory may have been promoted before relate
+        // was wired (e.g. manual promote during a session without the fix).
+        if (relatePiece) {
+          relatePiece.handleNewMemory({
+            id: mem.id,
+            title: mem.title,
+            content: mem.content,
+            evidence: mem.evidence,
+            origin: mem.origin_source ?? "user",
+            createdAt: new Date(mem.created_at).toISOString(),
+            category: mem.category,
+            siblingIds: [],
+          }).catch(() => {/* fire-and-forget */});
+        }
         return { ok: true, id: mem.id, already_promoted: true };
       }
       try {
