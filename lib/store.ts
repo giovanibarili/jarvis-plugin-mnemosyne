@@ -78,7 +78,33 @@ export class MnemosyneStore {
     if (!mem || mem.promoted_at) return;
 
     await this.markdownStore.promote(id);
-    await this.chroma.move("short", "long", id);
+
+    // Move from short → long. If the memory was never indexed in short
+    // (e.g. created via manual triage before Chroma wiring), fall back to
+    // a direct upsert in long so it's always searchable after promotion.
+    const inShort = await this.chroma.exists("short", id);
+    if (inShort) {
+      await this.chroma.move("short", "long", id);
+    } else {
+      await this.ensureChromaLong(mem);
+    }
+
     await this.neo4j.markPromoted(id, Date.now());
+  }
+
+  /** Upsert a memory directly into the long Chroma layer. Safe to call multiple times. */
+  async ensureChromaLong(mem: Memory): Promise<void> {
+    await this.chroma.upsert("long", {
+      id: mem.id,
+      content: mem.content,
+      metadata: {
+        title: mem.title ?? "",
+        category: mem.category ?? "",
+        confidence: mem.confidence ?? 0.8,
+        created_at: mem.created_at ?? Date.now(),
+        origin_source: mem.origin_source ?? "user",
+        evidence: mem.evidence ?? "",
+      },
+    });
   }
 }

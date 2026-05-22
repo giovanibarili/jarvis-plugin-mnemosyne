@@ -230,23 +230,31 @@ export function buildMemoryPromoteTool(
       if (!args.id) return { error: "id is required" };
       const mem = await resolveMemoryId(store, args.id);
       if (!mem) return { error: "not found" };
-      if (mem.promoted_at) {
-        // Still trigger relate — memory may have been promoted before relate
-        // was wired (e.g. manual promote during a session without the fix).
-        if (relatePiece) {
-          relatePiece.handleNewMemory({
-            id: mem.id,
-            title: mem.title,
-            content: mem.content,
-            evidence: mem.evidence,
-            origin: mem.origin_source ?? "user",
-            createdAt: new Date(mem.created_at).toISOString(),
-            category: mem.category,
+
+      const triggerRelate = (m: typeof mem) => {
+        if (!relatePiece) return;
+        // Ensure embedding exists in Chroma long before relate queries it.
+        // Fire-and-forget: ensure → relate in sequence.
+        (async () => {
+          try { await store.ensureChromaLong(m); } catch { /* best-effort */ }
+          relatePiece!.handleNewMemory({
+            id: m.id,
+            title: m.title,
+            content: m.content,
+            evidence: m.evidence,
+            origin: m.origin_source ?? "user",
+            createdAt: new Date(m.created_at).toISOString(),
+            category: m.category,
             siblingIds: [],
-          }).catch(() => {/* fire-and-forget */});
-        }
+          }).catch(() => {});
+        })();
+      };
+
+      if (mem.promoted_at) {
+        triggerRelate(mem);
         return { ok: true, id: mem.id, already_promoted: true };
       }
+
       try {
         await store.promote(mem.id);
       } catch (e) {
@@ -254,19 +262,7 @@ export function buildMemoryPromoteTool(
           error: `promote failed: ${e instanceof Error ? e.message : String(e)}`,
         };
       }
-      // Trigger async relate so promoted memory gets graph edges
-      if (relatePiece) {
-        relatePiece.handleNewMemory({
-          id: mem.id,
-          title: mem.title,
-          content: mem.content,
-          evidence: mem.evidence,
-          origin: mem.origin_source ?? "user",
-          createdAt: new Date(mem.created_at).toISOString(),
-          category: mem.category,
-          siblingIds: [],
-        }).catch(() => {/* fire-and-forget */});
-      }
+      triggerRelate(mem);
       return { ok: true, id: mem.id };
     },
   };

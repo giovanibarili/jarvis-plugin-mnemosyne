@@ -123,6 +123,11 @@ export class ChromaAdapter {
     await this.getCollection(layer).delete({ ids: [id] });
   }
 
+  async exists(layer: Layer, id: string): Promise<boolean> {
+    const result = await this.getCollection(layer).get({ ids: [id] });
+    return result.ids.length > 0;
+  }
+
   async move(fromLayer: Layer, toLayer: Layer, id: string): Promise<void> {
     const result = await this.getCollection(fromLayer).get({ ids: [id] });
     if (!result.ids.length) return;
