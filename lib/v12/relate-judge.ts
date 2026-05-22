@@ -36,12 +36,13 @@ export class RelateJudge {
 
     let raw: string;
     try {
-      raw = await this.llm.call({
+      const result = await this.llm.call({
         system: "You are a JSON-only relation classifier.",
         user,
         maxTokens: 200,
         model: this.model,
       });
+      raw = typeof result === "string" ? result : result.text;
     } catch (err: any) {
       return { relation: "unrelated", confidence: 0, reason: `llm_error: ${err.message ?? err}` };
     }
