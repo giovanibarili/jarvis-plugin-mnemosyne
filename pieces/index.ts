@@ -402,6 +402,14 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     // New since 0.5.x — drops "more-orthogonal-than-aligned" hits before
     // they pollute context. Default 0.0; tune via config to be stricter.
     minVectorSim: config.retriever.min_vector_sim ?? 0.0,
+    // v1.3 — graph neighborhood injection. Disabled by default; enable via config.
+    graphRetrieval: config.graph_retrieval?.enabled
+      ? {
+          enabled: true,
+          maxParents: config.graph_retrieval.max_parents,
+          maxChildren: config.graph_retrieval.max_children,
+        }
+      : undefined,
   }, relationLinker);
   const consolidator = new ConsolidatorPiece(store, conflictDetector, logger, {
     cron: config.consolidator.cron,
