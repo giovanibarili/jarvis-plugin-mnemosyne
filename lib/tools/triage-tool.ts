@@ -74,7 +74,7 @@ export function buildMnemosyneTriageTool(encoder: EncoderPiece): CapabilityDefin
 
       return {
         ok: true,
-        message: "Turn enqueued for extraction. The pipeline will triage, classify, gate, and store any memories found.",
+        message: "Enqueued for direct write. Bypasses triage/classify/gate — will be stored with confidence=1.0.",
         session_id: sessionId,
         preview: {
           user_message: prompt.slice(0, 120) + (prompt.length > 120 ? "…" : ""),
