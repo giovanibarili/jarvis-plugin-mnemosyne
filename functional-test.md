@@ -647,3 +647,71 @@ These scenarios exercise the three-step pipeline (triage → classify → relate
 **And** no v12 prompts are loaded
 **And** `pipeline_version` in extraction.log is absent or "1.1"
 **And** `~/.jarvis/mnemosyne/pending-categories.json` is not created or modified
+
+---
+
+## v1.3 Graph Retrieval BDD scenarios
+
+All scenarios assume `graph_retrieval.enabled: true` in config.
+
+### Scenario T13-1: Passive injection shows neighborhood
+
+**Given** `graph_retrieval.enabled: true`
+**And** memory M1 has 2 children in Neo4j (M2 with 3 grandchildren, M7 with 0)
+**And** M1 has 1 parent P1 with 0 grandchildren
+**When** the retriever fetches M1
+**Then** context injection contains `↑ P1 ... (0 filhos)`
+**And** context injection contains `↓ M2 ... (3 filhos)`
+**And** context injection contains `↓ M7 ... (0 filhos)`
+**And** the hint line `memory_fetch` appears
+
+### Scenario T13-2: Hint absent when no relations
+
+**Given** `graph_retrieval.enabled: true`
+**And** retrieved memory M1 has no parents or children in Neo4j
+**When** the retriever fetches M1
+**Then** no `↑` or `↓` lines appear
+**And** the hint line is NOT injected
+
+### Scenario T13-3: memory_fetch returns expanded neighborhood
+
+**Given** memory M2 has 2 children (C1 with 2 grandchildren, C2 with 0)
+**And** M2 has 1 parent P1
+**When** the LLM calls `memory_fetch("M2")`
+**Then** response includes `↑ P1 ...`
+**And** response includes `↓ C1 ...`
+**And** response includes `→ G1 ...` and `→ G2 ...` (grandchildren of C1)
+**And** response includes `↓ C2 ... (no children)`
+**And** response ends with `memory_fetch` navigation hint
+
+### Scenario T13-4: Feature flag off keeps v1.2 behavior
+
+**Given** `graph_retrieval.enabled: false` (default)
+**When** retriever fetches memories
+**Then** no neighborhood is attached to any RetrievalHit
+**And** no `↑`/`↓` lines appear in context injection
+**And** `memory_fetch` tool is not registered
+
+---
+
+## Workflow Chroma Retrieval BDD scenarios
+
+### Scenario TW-1: Workflow appears in injection when query matches trigger
+
+**Given** a workflow "ship-it" with trigger "implementation complete, ready to deliver" indexed in Chroma
+**When** the retriever receives query "ready to commit and push"
+**Then** the injected context includes a `📋 workflow` block
+**And** the block contains "ship-it", the trigger text, and `workflow_replay("ship-it")`
+
+### Scenario TW-2: Workflow not injected when similarity below threshold
+
+**Given** workflow "ship-it" indexed in Chroma
+**When** query has no semantic overlap (e.g. "what is the weather?")
+**Then** no `📋 workflow` block appears in the injected context
+
+### Scenario TW-3: Workflow indexed in Chroma when saved
+
+**Given** encoder processes a turn with a workflow candidate (≥2 steps, confidence ≥0.6)
+**When** `upsertWorkflow()` is called on Neo4j
+**Then** `chroma.upsertWorkflow()` is also called with name + trigger + outcome + steps summary
+**And** the workflow is retrievable via `queryWorkflows()`

@@ -172,6 +172,8 @@ export interface RetrievalHit {
   vectorSim?: number;
   /** Snippet of the memory content that overlaps the query (lexical overlap). */
   matchSnippet?: MatchSnippet;
+  /** v1.3: Graph neighborhood (parents + children) for this memory. */
+  neighborhood?: MemoryNeighborhood;
 }
 
 // ---- v1.2 TRIPLET types ----
@@ -226,3 +228,23 @@ export type RelateJudgement = {
   confidence: number;
   reason: string;
 };
+
+// ---- v1.3 Graph Retrieval ----
+
+export interface RelatedMemoryRef {
+  id: string;
+  title: string;
+  category: string;
+  relation: RelateRelation;
+  direction: "incoming" | "outgoing";
+  childCount: number;
+}
+
+export interface MemoryNeighborhood {
+  parents: RelatedMemoryRef[];
+  children: RelatedMemoryRef[];
+}
+
+export interface ExpandedChild extends RelatedMemoryRef {
+  grandchildren: RelatedMemoryRef[];
+}

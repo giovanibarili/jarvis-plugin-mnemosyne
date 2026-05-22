@@ -1,6 +1,14 @@
 import neo4j, { Driver, Session } from "neo4j-driver";
 import { promises as fs } from "fs";
-import type { Memory, Workflow, WorkflowStep } from "./types";
+import type {
+  Memory,
+  Workflow,
+  WorkflowStep,
+  RelatedMemoryRef,
+  MemoryNeighborhood,
+  ExpandedChild,
+  RelateRelation,
+} from "./types";
 
 export interface Neo4jAdapterOptions {
   uri: string;
@@ -253,6 +261,195 @@ export class Neo4jAdapter {
     } finally {
       await s.close();
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // v1.3 Graph Retrieval — runQuery helper + neighborhood expansion
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Internal helper that runs a Cypher query and returns plain JS objects
+   * (one per record). Each row is a map from RETURN alias → field value.
+   * Used by the v1.3 neighborhood methods. Stubbed in unit tests.
+   */
+  private async runQuery(
+    cypher: string,
+    params: Record<string, unknown> = {}
+  ): Promise<Array<Record<string, unknown>>> {
+    const s = this.session();
+    try {
+      const result = await s.run(cypher, params);
+      return result.records.map((rec) => {
+        const obj: Record<string, unknown> = {};
+        for (const key of rec.keys as string[]) {
+          obj[key] = rec.get(key);
+        }
+        return obj;
+      });
+    } finally {
+      await s.close();
+    }
+  }
+
+  /**
+   * Batch-fetch one-hop neighborhoods for a list of memory ids. For each root:
+   *   - parents:  memories that point TO root via RELATES_TO (incoming)
+   *   - children: memories that root points TO via RELATES_TO (outgoing)
+   *
+   * The `childCount` on a parent counts how many OTHER memories that parent
+   * relates to (excluding root). The `childCount` on a child counts how many
+   * grandchildren that child relates to (excluding root). Used by the retriever
+   * to decorate hits with neighborhood context.
+   */
+  async getNeighborhoodBatch(
+    ids: string[]
+  ): Promise<Map<string, MemoryNeighborhood>> {
+    if (ids.length === 0) return new Map();
+    const toNum = (v: unknown): number => {
+      if (v === null || v === undefined) return 0;
+      if (typeof v === "object" && v !== null && "low" in v)
+        return (v as { low: number }).low ?? 0;
+      return typeof v === "number" ? v : 0;
+    };
+    const rows = await this.runQuery(
+      `
+      UNWIND $ids AS rootId
+      MATCH (root:Memory {id: rootId})
+      OPTIONAL MATCH (parent:Memory)-[rp:RELATES_TO]->(root)
+      OPTIONAL MATCH (parent)<-[:RELATES_TO]-(parentChild:Memory)
+        WHERE parentChild.id <> root.id
+      OPTIONAL MATCH (root)-[rc:RELATES_TO]->(child:Memory)
+      OPTIONAL MATCH (child)-[:RELATES_TO]->(grandchild:Memory)
+        WHERE grandchild.id <> root.id
+      RETURN
+        rootId,
+        parent.id AS parentId, parent.title AS parentTitle,
+        parent.category AS parentCategory, rp.relation AS parentRelation,
+        count(DISTINCT parentChild) AS parentChildCount,
+        child.id AS childId, child.title AS childTitle,
+        child.category AS childCategory, rc.relation AS childRelation,
+        count(DISTINCT grandchild) AS childGrandchildCount
+    `,
+      { ids }
+    );
+
+    const result = new Map<string, MemoryNeighborhood>();
+    for (const row of rows) {
+      const rootId = row.rootId as string;
+      if (!result.has(rootId))
+        result.set(rootId, { parents: [], children: [] });
+      const n = result.get(rootId)!;
+
+      if (row.parentId) {
+        if (!n.parents.some((p) => p.id === row.parentId)) {
+          n.parents.push({
+            id: row.parentId as string,
+            title: (row.parentTitle as string) ?? "",
+            category: (row.parentCategory as string) ?? "",
+            relation: ((row.parentRelation as string) ??
+              "relates_to") as RelateRelation,
+            direction: "incoming",
+            childCount: toNum(row.parentChildCount),
+          });
+        }
+      }
+      if (row.childId) {
+        if (!n.children.some((c) => c.id === row.childId)) {
+          n.children.push({
+            id: row.childId as string,
+            title: (row.childTitle as string) ?? "",
+            category: (row.childCategory as string) ?? "",
+            relation: ((row.childRelation as string) ??
+              "relates_to") as RelateRelation,
+            direction: "outgoing",
+            childCount: toNum(row.childGrandchildCount),
+          });
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Single-memory neighborhood expansion with grandchildren. Returns the same
+   * parents/children as `getNeighborhoodBatch` plus a `childrenExpanded` array
+   * where each child carries its own `grandchildren` (excluding the root).
+   * Used by the panel to render the "drill into a memory" view.
+   */
+  async getNeighborhoodOne(
+    id: string
+  ): Promise<MemoryNeighborhood & { childrenExpanded: ExpandedChild[] }> {
+    const rows = await this.runQuery(
+      `
+      MATCH (root:Memory {id: $id})
+      OPTIONAL MATCH (parent:Memory)-[rp:RELATES_TO]->(root)
+      OPTIONAL MATCH (root)-[rc:RELATES_TO]->(child:Memory)
+      OPTIONAL MATCH (child)-[rg:RELATES_TO]->(grandchild:Memory)
+        WHERE grandchild.id <> root.id
+      RETURN
+        parent.id AS parentId, parent.title AS parentTitle,
+        parent.category AS parentCategory, rp.relation AS parentRelation,
+        child.id AS childId, child.title AS childTitle,
+        child.category AS childCategory, rc.relation AS childRelation,
+        grandchild.id AS grandchildId, grandchild.title AS grandchildTitle,
+        grandchild.category AS grandchildCategory, rg.relation AS grandchildRelation
+    `,
+      { id }
+    );
+
+    const parents: RelatedMemoryRef[] = [];
+    const childMap = new Map<string, ExpandedChild>();
+
+    for (const row of rows) {
+      if (row.parentId && !parents.some((p) => p.id === row.parentId)) {
+        parents.push({
+          id: row.parentId as string,
+          title: (row.parentTitle as string) ?? "",
+          category: (row.parentCategory as string) ?? "",
+          relation: ((row.parentRelation as string) ??
+            "relates_to") as RelateRelation,
+          direction: "incoming",
+          childCount: 0,
+        });
+      }
+      if (row.childId) {
+        if (!childMap.has(row.childId as string)) {
+          childMap.set(row.childId as string, {
+            id: row.childId as string,
+            title: (row.childTitle as string) ?? "",
+            category: (row.childCategory as string) ?? "",
+            relation: ((row.childRelation as string) ??
+              "relates_to") as RelateRelation,
+            direction: "outgoing",
+            childCount: 0,
+            grandchildren: [],
+          });
+        }
+        if (row.grandchildId) {
+          const child = childMap.get(row.childId as string)!;
+          if (!child.grandchildren.some((g) => g.id === row.grandchildId)) {
+            child.grandchildren.push({
+              id: row.grandchildId as string,
+              title: (row.grandchildTitle as string) ?? "",
+              category: (row.grandchildCategory as string) ?? "",
+              relation: ((row.grandchildRelation as string) ??
+                "relates_to") as RelateRelation,
+              direction: "outgoing",
+              childCount: 0,
+            });
+          }
+        }
+      }
+    }
+
+    const childrenExpanded = Array.from(childMap.values()).map((c) => ({
+      ...c,
+      childCount: c.grandchildren.length,
+    }));
+    const children: RelatedMemoryRef[] = childrenExpanded.map(
+      ({ grandchildren: _, ...rest }) => rest
+    );
+    return { parents, children, childrenExpanded };
   }
 
   private propsToMemory(props: any): Memory {

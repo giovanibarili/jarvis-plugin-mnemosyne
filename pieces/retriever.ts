@@ -1,9 +1,80 @@
 import type { EventBus, AIRequestMessage } from "@jarvis/core";
 import type { MnemosyneStore } from "../lib/store";
 import type { Reranker } from "../lib/reranker";
-import type { RetrievalHit } from "../lib/types";
+import type { RetrievalHit, MemoryNeighborhood } from "../lib/types";
 import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
 import { computeMatchSnippet } from "../lib/match-snippet.js";
+import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
+
+/**
+ * Render the parent/child neighborhood of a single memory as a short,
+ * indented markdown fragment. Used inline under each memory in the
+ * retrieval block. Returns "" when the neighborhood is empty (or absent),
+ * so callers can unconditionally concatenate.
+ *
+ * Parents are rendered with ↑ (this memory was relation-pointed-AT-by them),
+ * children with ↓ (this memory points OUT to them). Both formats are
+ * intentionally identical otherwise so the model parses them uniformly.
+ */
+export function formatNeighborhood(n: MemoryNeighborhood): string {
+  if (!n || (n.parents.length === 0 && n.children.length === 0)) return "";
+  const lines: string[] = [];
+  for (const p of n.parents) {
+    lines.push(`  ↑ ${p.id} [${p.category}] "${p.title}" — ${p.relation}  (${p.childCount} filhos)`);
+  }
+  for (const c of n.children) {
+    lines.push(`  ↓ ${c.id} [${c.category}] "${c.title}" — ${c.relation}  (${c.childCount} filhos)`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Input shape for {@link formatWorkflowHit}. Decoupled from the Chroma
+ * `WorkflowQueryHit` so the formatter is a pure function over a minimal
+ * projection — easy to unit-test without touching the store.
+ */
+export interface WorkflowHitFormatInput {
+  id: string;
+  name: string;
+  trigger: string;
+  outcome: string;
+  stepCount: number;
+  similarity: number;
+}
+
+/**
+ * Render a single workflow hit as a compact, model-friendly block.
+ * Mirrors the memory hit rendering style (📋 prefix instead of ●/◦, no
+ * confidence/reinforcement line). When `similarity` is 0 the sim chip is
+ * dropped — used by callers that pass workflows without a vector score.
+ *
+ * Includes a `workflow_replay("<name>")` call-to-action so the model has
+ * an obvious way to execute the procedure.
+ */
+export function formatWorkflowHit(hit: WorkflowHitFormatInput): string {
+  const lines: string[] = [];
+  const simStr = hit.similarity > 0 ? `  sim ${hit.similarity.toFixed(2)}` : "";
+  lines.push(`📋 workflow  [workflow]  ${hit.name}${simStr}`);
+  lines.push(`  trigger: ${hit.trigger}`);
+  lines.push(`  outcome: ${hit.outcome}`);
+  lines.push(`  ${hit.stepCount} steps  →  use \`workflow_replay("${hit.name}")\` to execute`);
+  return lines.join("\n");
+}
+
+/**
+ * Build the trailing hint that nudges the assistant towards `memory_fetch`
+ * when at least one retrieved hit exposes related parents or children.
+ * Returns "" when nothing in the block has relations — we don't want to
+ * advertise a tool the user has no reason to call.
+ */
+export function buildHint(hits: RetrievalHit[]): string {
+  const hasRelations = hits.some(
+    (h) => h.neighborhood && (h.neighborhood.parents.length > 0 || h.neighborhood.children.length > 0)
+  );
+  return hasRelations
+    ? "\n_Se necessário explorar uma memória relacionada, use `memory_fetch(id)`._"
+    : "";
+}
 
 export interface RetrieverOptions {
   topK: number;
@@ -19,6 +90,18 @@ export interface RetrieverOptions {
    * Default 0.0 (parity with old behaviour minus the most obvious noise).
    */
   minVectorSim?: number;
+  /**
+   * v1.3 — graph retrieval enrichment. When enabled, each surviving
+   * retrieval hit gets a `neighborhood` payload (parents + children)
+   * attached via {@link GraphNeighborhoodService}. The block renders an
+   * inline list of related memories under each hit so the model can decide
+   * whether to call `memory_fetch(id)` for more depth.
+   */
+  graphRetrieval?: {
+    enabled: boolean;
+    maxParents?: number;
+    maxChildren?: number;
+  };
 }
 
 /**
@@ -99,12 +182,27 @@ export class RetrieverPiece {
     if (producedBlock) this._stats.injectionsWithBlock++;
   }
 
+  /**
+   * v1.3 — graph enrichment service. Constructed lazily in the ctor when
+   * `opts.graphRetrieval?.enabled === true`. When absent, `enrichHits` is a
+   * no-op and `format()` skips the neighborhood/hint blocks entirely
+   * (parity with v1.2 output).
+   */
+  private graphNeighborhood?: GraphNeighborhoodService;
+
   constructor(
     private store: MnemosyneStore,
     private reranker: Reranker,
     private opts: RetrieverOptions,
     private relationLinker?: SemanticRelationLinker,
-  ) {}
+  ) {
+    if (opts.graphRetrieval?.enabled) {
+      this.graphNeighborhood = new GraphNeighborhoodService(store.neo4j, {
+        maxParents: opts.graphRetrieval.maxParents ?? 10,
+        maxChildren: opts.graphRetrieval.maxChildren ?? 20,
+      });
+    }
+  }
 
   private _started = false;
   async start(bus: EventBus): Promise<void> {
@@ -201,11 +299,11 @@ export class RetrieverPiece {
 
     this._stats.retrievals++;
     const query = this.buildQuery(sid);
-    const hits = await this.retrieve(query, sid);
+    const { hits, workflowHits } = await this.retrieve(query, sid);
     this._stats.hitsTotal += hits.length;
     if (hits.length > 0) this._stats.retrievalsWithHits++;
 
-    const block = this.format(hits);
+    const block = this.format(hits, workflowHits);
     this.cache.set(sid, { lastUserMsg: lastMsg, block });
     this.lastHits.set(sid, hits); // expose for injector timeline payload
 
@@ -250,7 +348,10 @@ export class RetrieverPiece {
     }
   }
 
-  private async retrieve(query: string, sessionId: string): Promise<RetrievalHit[]> {
+  private async retrieve(
+    query: string,
+    sessionId: string,
+  ): Promise<{ hits: RetrievalHit[]; workflowHits: string[] }> {
     // 1. Vector top-K from short + long
     const shortHits = await this.store.chroma.query("short", query, this.opts.topK);
     const longHits = await this.store.chroma.query("long", query, this.opts.topK);
@@ -322,25 +423,132 @@ export class RetrieverPiece {
     //    sorting/display so the user sees "best semantic match first" rather
     //    than "most-reinforced first".
     const reranked = this.reranker.rerank(memories);
-    return reranked.slice(0, this.opts.topK);
+    const top = reranked.slice(0, this.opts.topK);
+
+    // 6. v1.3 — attach graph neighborhood (parents + children) to each
+    //    surviving hit. Best-effort: a Neo4j hiccup must not break retrieval.
+    if (this.graphNeighborhood) {
+      try {
+        await this.enrichHits(top);
+      } catch (err) {
+        console.error("[mnemosyne] graph enrichment failed:", err);
+      }
+    }
+
+    // 7. Workflow retrieval. Query the dedicated mnemosyne_workflows
+    //    collection for procedures relevant to the current prompt and
+    //    pre-render them as strings. We threshold at sim ≥ 0.6 because
+    //    workflows are large, prescriptive blocks — false positives are
+    //    expensive in token budget. Best-effort: the collection may not
+    //    exist yet (fresh install) or the embed call may fail; either way
+    //    we degrade silently to "no workflows injected".
+    const workflowHits: string[] = [];
+    try {
+      const wfResults = await this.store.chroma.queryWorkflows(query, 3);
+      for (const w of wfResults) {
+        const similarity = 1 - w.distance;
+        if (similarity < 0.6) continue;
+        workflowHits.push(
+          formatWorkflowHit({
+            id: w.id,
+            name: (w.metadata.name as string) ?? w.id,
+            trigger: (w.metadata.trigger as string) ?? "",
+            outcome: (w.metadata.outcome as string) ?? "",
+            stepCount: (w.metadata.step_count as number) ?? 0,
+            similarity,
+          }),
+        );
+      }
+    } catch {
+      // mnemosyne_workflows collection may not exist yet — skip silently
+    }
+
+    return { hits: top, workflowHits };
   }
 
-  private format(hits: RetrievalHit[]): string {
-    if (!hits.length) return "";
-    const lines = ["## Mnemosyne — Relevant memories", ""];
-    hits.forEach((hit, i) => {
+  /**
+   * v1.3 — attach a {@link MemoryNeighborhood} to every hit in-place.
+   * No-op when graph retrieval is disabled. Batched via `enrichBatch`
+   * so we issue a single Neo4j round-trip for the whole hit list.
+   */
+  private async enrichHits(hits: RetrievalHit[]): Promise<void> {
+    if (!this.graphNeighborhood) return;
+    const ids = hits.map((h) => h.memory.id);
+    const map = await this.graphNeighborhood.enrichBatch(ids);
+    for (const hit of hits) {
+      const n = map.get(hit.memory.id);
+      if (n) hit.neighborhood = n;
+    }
+  }
+
+  private format(hits: RetrievalHit[], workflowHits: string[] = []): string {
+    if (!hits.length && !workflowHits.length) return "";
+    const lines: string[] = [];
+    if (hits.length) {
+      lines.push("## Mnemosyne — Relevant memories", "");
+    }
+    hits.forEach((hit) => {
       const m = hit.memory;
-      lines.push(`${i + 1}. **[${m.category}]** ${m.title}`);
-      lines.push(`   ${m.content}`);
-      const created = new Date(m.created_at).toISOString().slice(0, 10);
-      const meta = `_ref: ${m.id.slice(0, 4)} • created: ${created} • reinforcements: ${m.reinforcements}_`;
-      lines.push(`   ${meta}`);
+      const bd = hit.scoreBreakdown;
+
+      // Strength label based on rerank total score
+      const strength = hit.score >= 0.7 ? "HIGH" : hit.score >= 0.4 ? "MEDIUM" : "WEAK";
+
+      // Source tag
+      const sourceTag = hit.source === "graph" ? "◦ graph" : "● vector";
+
+      // sim + rerank
+      const simStr = hit.vectorSim != null ? `sim ${hit.vectorSim.toFixed(2)}` : null;
+      const rerankStr = `rerank ${hit.score.toFixed(2)}`;
+      const scores = [simStr, rerankStr].filter(Boolean).join("  ");
+
+      // Title line: source · strength · [category] title
+      lines.push(`${sourceTag}  ${strength}  [${m.category}]  ${m.title}`);
+
+      // Score line
+      lines.push(`  ${scores}  ·  conf ${m.confidence?.toFixed(2) ?? "—"}  ·  reinf ${m.reinforcements}`);
+
+      // Why: score breakdown components
+      if (bd) {
+        lines.push(`  why: recency ${bd.recency.toFixed(2)}  conf ${bd.confidence.toFixed(2)}  reinf ${bd.reinforcements.toFixed(2)}  graph ${bd.graphDistance.toFixed(1)}`);
+      }
+
+      // Match snippet (why this memory matched the query)
+      if (hit.matchSnippet?.matchedTerms?.length) {
+        lines.push(`  matched on \`${hit.matchSnippet.matchedTerms.join(", ")}\`: ${hit.matchSnippet.text.slice(0, 120)}`);
+      }
+
+      // Content
+      lines.push(`> ${m.content}`);
+
+      // Conflicts
       if (hit.conflicts_with?.length) {
         const refs = hit.conflicts_with.map((c) => c.slice(0, 4)).join(", ");
-        lines.push(`   ⚠️ Conflicts with: ${refs}`);
+        lines.push(`⚠️ Conflicts with: ${refs}`);
       }
+
+      // v1.3 — inline graph neighborhood (parents ↑ / children ↓ with child count).
+      const neighborhood = hit.neighborhood ? formatNeighborhood(hit.neighborhood) : "";
+      if (neighborhood) lines.push(neighborhood);
+
       lines.push("");
     });
+
+    // Workflow section — appended after memories. Rendered with a divider
+    // so the model treats memories and procedures as distinct blocks.
+    if (workflowHits.length > 0) {
+      if (hits.length) lines.push("---");
+      lines.push("## Relevant workflows");
+      lines.push("");
+      for (const wh of workflowHits) {
+        lines.push(wh);
+        lines.push("");
+      }
+    }
+
+    // v1.3 — hint when any hit has relations
+    const hint = buildHint(hits);
+    if (hint) lines.push(hint);
     return lines.join("\n");
   }
 }
