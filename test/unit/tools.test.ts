@@ -667,3 +667,66 @@ describe("resolveMemoryId edge cases", () => {
     expect(await resolveMemoryId(store, "")).toBeNull();
   });
 });
+
+// ── mnemosyne_triage ──────────────────────────────────────────────────────────
+import { buildMnemosyneTriageTool } from "../../lib/tools/triage-tool";
+import type { EncoderPiece } from "../../pieces/encoder";
+
+describe("mnemosyne_triage", () => {
+  function makeEncoder() {
+    return { enqueue: vi.fn() } as unknown as EncoderPiece;
+  }
+
+  it("enqueues a turn with the given prompt", async () => {
+    const encoder = makeEncoder();
+    const tool = buildMnemosyneTriageTool(encoder);
+    const result = (await tool.handler({ prompt: "Use EventBus for all inter-piece communication" })) as any;
+    expect(result.ok).toBe(true);
+    expect(encoder.enqueue).toHaveBeenCalledTimes(1);
+    const turn = (encoder.enqueue as any).mock.calls[0][0];
+    expect(turn.user_message).toBe("Use EventBus for all inter-piece communication");
+    expect(turn.assistant_response).toBe("");
+    expect(turn.session_id).toBe("manual-triage");
+    expect(typeof turn.timestamp).toBe("number");
+  });
+
+  it("uses provided assistant_response and session_id", async () => {
+    const encoder = makeEncoder();
+    const tool = buildMnemosyneTriageTool(encoder);
+    await tool.handler({
+      prompt: "Always use bolt://127.0.0.1 for local Neo4j",
+      assistant_response: "Confirmed — loopback only per D10",
+      session_id: "main",
+    });
+    const turn = (encoder.enqueue as any).mock.calls[0][0];
+    expect(turn.assistant_response).toBe("Confirmed — loopback only per D10");
+    expect(turn.session_id).toBe("main");
+  });
+
+  it("returns error for empty prompt", async () => {
+    const encoder = makeEncoder();
+    const tool = buildMnemosyneTriageTool(encoder);
+    const result = (await tool.handler({ prompt: "   " })) as any;
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/required/);
+    expect(encoder.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("returns error when prompt is missing", async () => {
+    const encoder = makeEncoder();
+    const tool = buildMnemosyneTriageTool(encoder);
+    const result = (await tool.handler({})) as any;
+    expect(result.ok).toBe(false);
+    expect(encoder.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("preview is truncated to 120 chars for long prompts", async () => {
+    const encoder = makeEncoder();
+    const tool = buildMnemosyneTriageTool(encoder);
+    const long = "A".repeat(200);
+    const result = (await tool.handler({ prompt: long })) as any;
+    expect(result.ok).toBe(true);
+    expect(result.preview.user_message.endsWith("…")).toBe(true);
+    expect(result.preview.user_message.length).toBeLessThanOrEqual(121);
+  });
+});

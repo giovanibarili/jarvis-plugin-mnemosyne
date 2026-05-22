@@ -53,6 +53,7 @@ import {
   buildMnemosyneStatsTool,
 } from "../lib/tools/admin-tools.js";
 import { buildMemoryFetchTool } from "../lib/tools/memory-fetch.js";
+import { buildMnemosyneTriageTool } from "../lib/tools/triage-tool.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
 
 // ESM equivalent of __dirname
@@ -439,7 +440,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   registerCron(ctx, config.consolidator.cron);
 
   // 9. Tool registration (Task 13)
-  registerTools(ctx, store, neo4j, consolidator, replayEngine, config.retriever.rerank_weights, config);
+  registerTools(ctx, store, neo4j, consolidator, replayEngine, encoder, config.retriever.rerank_weights, config);
 
   // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
   // The renderer fetches POST /plugins/jarvis-plugin-mnemosyne/{forget,pin,consolidate}.
@@ -825,6 +826,7 @@ function registerTools(
   neo4j: Neo4jAdapter,
   consolidator: ConsolidatorPiece,
   replay: ReplayEngine,
+  encoder: EncoderPiece,
   rerankWeights: RerankWeights,
   config: any
 ): void {
@@ -851,6 +853,7 @@ function registerTools(
   // Admin
   reg.register(buildMnemosyneConsolidateTool(consolidator));
   reg.register(buildMnemosyneStatsTool(store));
+  reg.register(buildMnemosyneTriageTool(encoder));
 
   // v1.3 Graph Retrieval — memory_fetch tool (gated by config)
   // t-4 wires graphNeighborhood at bootstrap level; until that lands, we
