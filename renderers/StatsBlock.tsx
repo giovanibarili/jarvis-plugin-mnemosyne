@@ -1,19 +1,3 @@
-// renderers/StatsBlock.tsx
-//
-// Inline collapsible runtime metrics block for the Mnemosyne HUD panel.
-//
-// Displays four cards in a 4-column grid:
-//   1. Encoder    — turn throughput, new memories, dedupe, cost since boot
-//   2. Retriever  — retrievals, hit rate, injection rate, reinforcements
-//   3. Skip reasons — bucketed counts (Haiku-classified, fallback heuristics)
-//   4. Categories — bar chart of category mix from triage
-//
-// Pure presentation. All numbers come from PanelData.runtime which is built
-// server-side in lib/stats.ts. The block is collapsible (default open) so
-// users with smaller HUD panels can hide it.
-//
-// React (createElement) is supplied by the esbuild banner — see globals.d.ts.
-
 import type { RuntimeStats, PipelineStepStats } from "./types";
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
@@ -26,8 +10,7 @@ interface Props {
 
 function fmtPct(num: number, denom: number): string {
   if (denom <= 0) return "—";
-  const pct = (num / denom) * 100;
-  return `${pct.toFixed(0)}%`;
+  return `${((num / denom) * 100).toFixed(0)}%`;
 }
 
 function fmtCost(usd: number): string {
@@ -52,187 +35,239 @@ async function triggerRefresh(): Promise<void> {
   await fetch(`${PLUGIN_BASE}/refresh`, { method: "POST" });
 }
 
+// ── Pipeline step state ───────────────────────────────────────────────────────
+type StepState = "active" | "next" | "idle";
+
+function stepState(
+  step: "triage" | "classify" | "relate",
+  activeStep: "triage" | "classify" | "relate" | null
+): StepState {
+  if (activeStep === step) return "active";
+  if (activeStep === "triage"   && step === "classify") return "next";
+  if (activeStep === "classify" && step === "relate")   return "next";
+  return "idle";
+}
+
+// queue per step: only triage has a real queue (turns waiting to enter the
+// pipeline). classify = 1 if triage just passed (turn is in classify now),
+// relate = 1 if classify just passed. Both are derived from activeStep.
+function stepQueue(
+  step: "triage" | "classify" | "relate",
+  queueDepth: number,
+  activeStep: "triage" | "classify" | "relate" | null
+): number {
+  if (step === "triage")   return activeStep ? queueDepth : 0;
+  if (step === "classify") return activeStep === "classify" || activeStep === "relate" ? 1 : 0;
+  if (step === "relate")   return activeStep === "relate" ? 1 : 0;
+  return 0;
+}
+
+const STEP_COLORS: Record<StepState, { bar: string; label: string; bg: string; queue: string }> = {
+  active: { bar: "#10b981", label: "#10b981", bg: "#0a1f14", queue: "#10b981" },
+  next:   { bar: "#065f46", label: "#6ee7b7", bg: "#0a1a10", queue: "#6ee7b7" },
+  idle:   { bar: "#2a2a2a", label: "#555",    bg: "#111",    queue: "#444"    },
+};
+
+function PipelineTableRow({
+  step, stats, state, queue,
+}: {
+  step: "triage" | "classify" | "relate";
+  stats: PipelineStepStats;
+  state: StepState;
+  queue: number;
+}) {
+  const c = STEP_COLORS[state];
+  return (
+    <div style={{ ...s.pipelineRow, backgroundColor: c.bg }}>
+      {/* left state bar */}
+      <div style={{ ...s.pipelineBar, backgroundColor: c.bar }} />
+      {/* step name */}
+      <span style={{ ...s.pipelineStepName, color: c.label }}>{step}</span>
+      {/* calls */}
+      <span style={s.pipelineCalls}>{stats.calls}×</span>
+      {/* spend */}
+      <span style={{ ...s.pipelineSpend, color: state === "idle" ? "#555" : "#10b981" }}>
+        {fmtCost(stats.costUsd)}
+      </span>
+      {/* queue badge */}
+      <div style={{
+        ...s.pipelineQueueBadge,
+        backgroundColor: queue > 0 ? (state === "active" ? "#1a2f1a" : "#1f1a0a") : "#0d0d0d",
+        color: queue > 0 ? (state === "active" ? c.queue : "#f59e0b") : "#2a2a2a",
+        border: `1px solid ${queue > 0 ? (state === "active" ? "#1a3f1a" : "#3f2f0a") : "#1a1a1a"}`,
+      }}>
+        {queue}
+      </div>
+    </div>
+  );
+}
+
 export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
-  // Empty state: bootstrap may not have completed yet, or stats wiring is
-  // disabled. We still render the toggle so the layout is stable.
   if (!runtime) {
     return (
-      <div style={styles.wrap}>
-        <div style={styles.header} onClick={onToggle}>
-          <span style={styles.headerTitle}>📊 Runtime stats</span>
-          <span style={styles.headerHint}>(stats unavailable)</span>
-          <button style={styles.refreshBtn} onClick={(e: any) => { e.stopPropagation(); void triggerRefresh(); }} title="Refresh">↺</button>
+      <div style={s.wrap}>
+        <div style={s.header} onClick={onToggle}>
+          <span style={s.headerTitle}>📊 Runtime stats</span>
+          <span style={s.headerHint}>(stats unavailable)</span>
+          <button style={s.refreshBtn} onClick={(e: any) => { e.stopPropagation(); void triggerRefresh(); }}>↺</button>
         </div>
       </div>
     );
   }
 
-  const e = runtime.encoder;
-  const r = runtime.retriever;
+  const e  = runtime.encoder;
+  const r  = runtime.retriever;
   const sb = runtime.skipBuckets;
   const totalSkips = sb.casual + sb["no-signal"] + sb.error + sb.timeout + sb.other;
+  const activeStep = e.activeStep ?? null;
 
-  // Categories: take top 5 by count for compact display.
   const categories = Object.entries(e.categoriesCount)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
   const maxCat = categories.length > 0 ? categories[0][1] : 0;
 
   return (
-    <div style={styles.wrap}>
-      <div style={styles.header}>
-        <div style={styles.headerLeft} onClick={onToggle}>
-          <span style={styles.headerTitle}>📊 Runtime stats</span>
-          <span style={styles.headerHint}>(since boot)</span>
-          <span style={styles.headerToggle}>{collapsed ? "▸" : "▾"}</span>
+    <div style={s.wrap}>
+      {/* ── Header ── */}
+      <div style={s.header}>
+        <div style={s.headerLeft} onClick={onToggle}>
+          <span style={s.headerTitle}>📊 Runtime stats</span>
+          <span style={s.headerHint}>(since boot)</span>
+          <span style={s.headerToggle}>{collapsed ? "▸" : "▾"}</span>
         </div>
-        <button style={styles.refreshBtn} onClick={(e: any) => { e.stopPropagation(); void triggerRefresh(); }} title="Refresh stats">↺</button>
+        <button style={s.refreshBtn} onClick={(ev: any) => { ev.stopPropagation(); void triggerRefresh(); }} title="Refresh">↺</button>
       </div>
 
       {!collapsed ? (
-        <div style={styles.grid}>
-          {/* ── Encoder ── full width */}
-          <div style={{ ...styles.card, ...styles.cardFull }}>
-            <div style={styles.cardTitle}>📥 Encoder</div>
-            <div style={styles.row}>
-              <span style={styles.metric}>{e.turnsProcessed}</span>
-              <span style={styles.metricLabel}>turns processed</span>
+        <div style={s.grid}>
+
+          {/* ── ENCODER ── col 1, full height */}
+          <div style={s.card}>
+            <div style={s.cardTitle}>📥 Encoder</div>
+
+            {/* stats in one horizontal row */}
+            <div style={s.statsRow}>
+              <StatChip value={e.turnsProcessed} label="turns" color="#e0e0e0" />
+              <StatChip value={e.memoriesWritten} label="new" color="#10b981" />
+              <StatChip value={e.memoriesDeduped} label="deduped" color="#888" />
+              <StatChip value={e.turnsSkipped} label={`skipped (${fmtPct(e.turnsSkipped, e.turnsProcessed)})`} color="#f59e0b" />
+              {e.turnsErrored > 0 && <StatChip value={e.turnsErrored} label="errors" color="#ef4444" />}
             </div>
-            <div style={styles.row}>
-              <span style={{ ...styles.metric, color: "#10b981" }}>{e.memoriesWritten}</span>
-              <span style={styles.metricLabel}>new memories</span>
-            </div>
-            <div style={styles.row}>
-              <span style={{ ...styles.metric, color: "#888" }}>{e.memoriesDeduped}</span>
-              <span style={styles.metricLabel}>deduped</span>
-            </div>
-            <div style={styles.row}>
-              <span style={{ ...styles.metric, color: "#f59e0b" }}>{e.turnsSkipped}</span>
-              <span style={styles.metricLabel}>skipped</span>
-              <span style={styles.metricSub}>
-                ({fmtPct(e.turnsSkipped, e.turnsProcessed)})
-              </span>
-            </div>
-            {e.turnsErrored > 0 ? (
-              <div style={styles.row}>
-                <span style={{ ...styles.metric, color: "#ef4444" }}>{e.turnsErrored}</span>
-                <span style={styles.metricLabel}>errors</span>
-              </div>
-            ) : null}
-            {/* Pipeline spend inline — triage → classify → relate */}
+
+            {/* pipeline table */}
             {e.pipeline ? (
-              <div style={styles.pipelineBlock}>
-                <PipelineStep label="triage"   stats={e.pipeline.triage}   active={e.processing && e.queueDepth > 0} />
-                <span style={styles.pipelineArrow}>→</span>
-                <PipelineStep label="classify" stats={e.pipeline.classify} active={false} />
-                <span style={styles.pipelineArrow}>→</span>
-                <PipelineStep label="relate"   stats={e.pipeline.relate}   active={false} />
-                <span style={styles.pipelineSpacer} />
-                <span style={styles.pipelineTotal}>{fmtCost(e.costUsd)} total</span>
-              </div>
+              <>
+                <div style={s.pipelineDivider} />
+                {/* column headers */}
+                <div style={s.pipelineHeaders}>
+                  <div style={s.pipelineBar} />
+                  <span style={{ ...s.pipelineStepName, color: "#333" }}>STEP</span>
+                  <span style={s.pipelineCalls}>CALLS</span>
+                  <span style={s.pipelineSpend}>SPEND</span>
+                  <span style={s.pipelineQueueBadge}>Q</span>
+                </div>
+                {(["triage", "classify", "relate"] as const).map((step) => (
+                  <PipelineTableRow
+                    key={step}
+                    step={step}
+                    stats={e.pipeline![step]}
+                    state={stepState(step, activeStep)}
+                    queue={stepQueue(step, e.queueDepth, activeStep)}
+                  />
+                ))}
+                <div style={s.pipelineLegend}>
+                  Q: triage=fila entrada · classify/relate= 0 ou 1
+                </div>
+              </>
             ) : null}
-            <div style={styles.footer}>
-              <span style={{
-                ...styles.footerBadge,
-                color: e.processing ? "#10b981" : "#555",
-              }}>
+
+            {/* footer */}
+            <div style={s.footer}>
+              <span style={s.footerHint}>{fmtCost(e.costUsd)} total</span>
+              <span style={{ ...s.badge, color: e.processing ? "#10b981" : "#555", backgroundColor: e.processing ? "#0a1f14" : "#181818" }}>
                 {e.processing ? "● processing" : "○ idle"}
               </span>
-              {e.queueDepth > 0 ? (
-                <span style={{ ...styles.footerBadge, color: "#f59e0b" }}>
+              {e.queueDepth > 0 && (
+                <span style={{ ...s.badge, color: "#f59e0b", backgroundColor: "#1f1a0a" }}>
                   queue: {e.queueDepth}
                 </span>
-              ) : null}
+              )}
             </div>
           </div>
 
-          {/* ── Retriever ── */}
-          <div style={styles.card}>
-            <div style={styles.cardTitle}>🎯 Retriever</div>
-            <div style={styles.row}>
-              <span style={styles.metric}>{r.retrievals}</span>
-              <span style={styles.metricLabel}>retrievals</span>
-            </div>
-            <div style={styles.row}>
-              <span style={{ ...styles.metric, color: "#10b981" }}>{r.retrievalsWithHits}</span>
-              <span style={styles.metricLabel}>with hits</span>
-              <span style={styles.metricSub}>
-                ({fmtPct(r.retrievalsWithHits, r.retrievals)})
-              </span>
-            </div>
-            <div style={styles.row}>
-              <span style={{ ...styles.metric, color: "#8b5cf6" }}>
-                {r.avgHits.toFixed(1)}
-              </span>
-              <span style={styles.metricLabel}>avg hits/retrieval</span>
-            </div>
-            <div style={styles.row}>
-              <span style={{ ...styles.metric, color: "#3b82f6" }}>{r.injectionsWithBlock}</span>
-              <span style={styles.metricLabel}>injections</span>
-              <span style={styles.metricSub}>
-                ({fmtPct(r.injectionsWithBlock, r.injections)})
-              </span>
-            </div>
-            <div style={styles.row}>
-              <span style={{ ...styles.metric, color: "#fbbf24" }}>{r.reinforcements}</span>
-              <span style={styles.metricLabel}>reinforcements</span>
-            </div>
-            <div style={styles.footer}>
-              <span style={styles.footerHint}>
+          {/* ── RETRIEVER ── col 2 */}
+          <div style={s.card}>
+            <div style={s.cardTitle}>🎯 Retriever</div>
+            <MetricRow value={r.retrievals}           label="retrievals"        color="#e0e0e0" />
+            <MetricRow value={r.retrievalsWithHits}   label={`with hits (${fmtPct(r.retrievalsWithHits, r.retrievals)})`} color="#10b981" />
+            <MetricRow value={r.avgHits.toFixed(1)}   label="avg hits/retrieval" color="#8b5cf6" />
+            <MetricRow value={r.injectionsWithBlock}  label={`injections (${fmtPct(r.injectionsWithBlock, r.injections)})`} color="#3b82f6" />
+            <MetricRow value={r.reinforcements}       label="reinforcements"     color="#fbbf24" />
+            <div style={s.footer}>
+              <span style={s.footerHint}>
                 {r.cacheHits} cache hit{r.cacheHits === 1 ? "" : "s"} · {r.sessionsTracked} session{r.sessionsTracked === 1 ? "" : "s"}
               </span>
             </div>
           </div>
 
-          {/* ── Skip reasons ── */}
-          <div style={styles.card}>
-            <div style={styles.cardTitle}>🚫 Skip reasons</div>
+          {/* ── SKIP REASONS ── col 1 row 2 */}
+          <div style={s.card}>
+            <div style={s.cardTitle}>🚫 Skip reasons</div>
             {totalSkips === 0 ? (
-              <div style={styles.empty}>no skips recorded</div>
+              <div style={s.empty}>no skips recorded</div>
             ) : (
               <>
-                <BucketRow label="casual" value={sb.casual} max={totalSkips} color="#888" />
-                <BucketRow label="no-signal" value={sb["no-signal"]} max={totalSkips} color="#9aa0a6" />
-                <BucketRow label="error" value={sb.error} max={totalSkips} color="#ef4444" />
-                <BucketRow label="timeout" value={sb.timeout} max={totalSkips} color="#f59e0b" />
-                <BucketRow label="other" value={sb.other} max={totalSkips} color="#666" />
+                <BucketRow label="casual"    value={sb.casual}          max={totalSkips} color="#888" />
+                <BucketRow label="no-signal" value={sb["no-signal"]}    max={totalSkips} color="#9aa0a6" />
+                <BucketRow label="error"     value={sb.error}           max={totalSkips} color="#ef4444" />
+                <BucketRow label="timeout"   value={sb.timeout}         max={totalSkips} color="#f59e0b" />
+                <BucketRow label="other"     value={sb.other}           max={totalSkips} color="#666" />
               </>
             )}
-            <div style={styles.footer}>
-              <span style={styles.footerHint}>
-                Haiku map: {fmtRelTime(runtime.bucketMapUpdatedAt)}
-              </span>
+            <div style={s.footer}>
+              <span style={s.footerHint}>Haiku map: {fmtRelTime(runtime.bucketMapUpdatedAt)}</span>
             </div>
           </div>
 
-          {/* ── Categories ── */}
-          <div style={styles.card}>
-            <div style={styles.cardTitle}>🏷 Categories extracted</div>
+          {/* ── CATEGORIES ── col 2 row 2 */}
+          <div style={s.card}>
+            <div style={s.cardTitle}>🏷 Categories extracted</div>
             {categories.length === 0 ? (
-              <div style={styles.empty}>no triage data yet</div>
+              <div style={s.empty}>no triage data yet</div>
             ) : (
               categories.map(([cat, n]) => (
                 <BucketRow key={cat} label={cat} value={n} max={maxCat} color="#3b82f6" />
               ))
             )}
-            <div style={styles.footer}>
-              <span style={styles.footerHint}>
+            <div style={s.footer}>
+              <span style={s.footerHint}>
                 {e.candidatesEmitted} candidate{e.candidatesEmitted === 1 ? "" : "s"} emitted
               </span>
             </div>
           </div>
+
         </div>
       ) : null}
     </div>
   );
 }
 
-function PipelineStep({ label, stats, active }: { label: string; stats: PipelineStepStats; active: boolean }) {
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function StatChip({ value, label, color }: { value: number | string; label: string; color: string }) {
   return (
-    <div style={{ ...styles.pipelineStepBox, borderColor: active ? "#10b981" : "#232323" }}>
-      <span style={{ ...styles.pipelineStepLabel, color: active ? "#10b981" : "#666" }}>{label}</span>
-      <span style={styles.pipelineStepCalls}>{stats.calls}×</span>
-      <span style={styles.pipelineStepCost}>{fmtCost(stats.costUsd)}</span>
+    <div style={s.statChip}>
+      <span style={{ ...s.statChipValue, color }}>{value}</span>
+      <span style={s.statChipLabel}>{label}</span>
+    </div>
+  );
+}
+
+function MetricRow({ value, label, color }: { value: number | string; label: string; color: string }) {
+  return (
+    <div style={s.row}>
+      <span style={{ ...s.metric, color }}>{value}</span>
+      <span style={s.metricLabel}>{label}</span>
     </div>
   );
 }
@@ -240,17 +275,19 @@ function PipelineStep({ label, stats, active }: { label: string; stats: Pipeline
 function BucketRow({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
   const pct = max > 0 ? (value / max) * 100 : 0;
   return (
-    <div style={styles.bucketRow}>
-      <span style={styles.bucketLabel}>{label}</span>
-      <div style={styles.bucketBarWrap}>
-        <div style={{ ...styles.bucketBar, width: `${pct}%`, backgroundColor: color }} />
+    <div style={s.bucketRow}>
+      <span style={s.bucketLabel}>{label}</span>
+      <div style={s.bucketBarWrap}>
+        <div style={{ ...s.bucketBar, width: `${pct}%`, backgroundColor: color }} />
       </div>
-      <span style={styles.bucketValue}>{value}</span>
+      <span style={s.bucketValue}>{value}</span>
     </div>
   );
 }
 
-const styles: Record<string, any> = {
+// ── Styles ────────────────────────────────────────────────────────────────────
+
+const s: Record<string, any> = {
   wrap: {
     display: "flex",
     flexDirection: "column",
@@ -275,38 +312,18 @@ const styles: Record<string, any> = {
     flex: 1,
     cursor: "pointer",
   },
-  headerTitle: {
-    fontSize: "12px",
-    fontWeight: 600,
-    color: "#bbb",
-  },
-  headerHint: {
-    fontSize: "11px",
-    color: "#666",
-    flex: 1,
-  },
-  headerToggle: {
-    fontSize: "11px",
-    color: "#666",
-  },
+  headerTitle: { fontSize: "12px", fontWeight: 600, color: "#bbb" },
+  headerHint:  { fontSize: "11px", color: "#666", flex: 1 },
+  headerToggle:{ fontSize: "11px", color: "#666" },
   refreshBtn: {
-    background: "none",
-    border: "none",
-    color: "#555",
-    cursor: "pointer",
-    fontSize: "13px",
-    padding: "0 0 0 8px",
-    lineHeight: 1,
-    flexShrink: 0,
+    background: "none", border: "none", color: "#555",
+    cursor: "pointer", fontSize: "13px", padding: "0 0 0 8px", lineHeight: 1, flexShrink: 0,
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
     gap: "8px",
     padding: "10px",
-  },
-  cardFull: {
-    gridColumn: "1 / -1",
   },
   card: {
     display: "flex",
@@ -319,148 +336,140 @@ const styles: Record<string, any> = {
     minWidth: 0,
   },
   cardTitle: {
-    fontSize: "11px",
-    fontWeight: 600,
-    color: "#9aa0a6",
-    textTransform: "uppercase",
-    letterSpacing: "0.04em",
-    marginBottom: "4px",
+    fontSize: "11px", fontWeight: 600, color: "#9aa0a6",
+    textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "4px",
   },
-  row: {
+
+  // stats in one row
+  statsRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: "8px",
+    alignItems: "baseline",
+  },
+  statChip: {
     display: "flex",
     alignItems: "baseline",
-    gap: "5px",
+    gap: "3px",
   },
-  metric: {
+  statChipValue: {
     fontSize: "15px",
     fontWeight: 700,
-    color: "#e0e0e0",
     fontVariantNumeric: "tabular-nums",
-    minWidth: "26px",
   },
-  metricLabel: {
-    fontSize: "11px",
-    color: "#888",
-    flex: 1,
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-  },
-  metricSub: {
+  statChipLabel: {
     fontSize: "10px",
     color: "#555",
-    fontVariantNumeric: "tabular-nums",
   },
+
+  // pipeline table
+  pipelineDivider: {
+    height: "1px",
+    backgroundColor: "#1e1e1e",
+    margin: "6px 0 2px",
+  },
+  pipelineHeaders: {
+    display: "flex",
+    alignItems: "center",
+    gap: "0",
+    padding: "0 0 2px 0",
+  },
+  pipelineRow: {
+    display: "flex",
+    alignItems: "center",
+    borderRadius: "3px",
+    marginBottom: "2px",
+    overflow: "hidden",
+  },
+  pipelineBar: {
+    width: "3px",
+    alignSelf: "stretch",
+    flexShrink: 0,
+    minHeight: "24px",
+  },
+  pipelineStepName: {
+    fontSize: "11px",
+    fontWeight: 600,
+    width: "62px",
+    paddingLeft: "8px",
+    flexShrink: 0,
+  },
+  pipelineCalls: {
+    fontSize: "11px",
+    color: "#bbb",
+    fontVariantNumeric: "tabular-nums",
+    width: "36px",
+    textAlign: "right" as const,
+    flexShrink: 0,
+  },
+  pipelineSpend: {
+    fontSize: "11px",
+    fontVariantNumeric: "tabular-nums",
+    flex: 1,
+    textAlign: "right" as const,
+    paddingRight: "10px",
+  },
+  pipelineQueueBadge: {
+    fontSize: "11px",
+    fontWeight: 700,
+    fontVariantNumeric: "tabular-nums",
+    width: "28px",
+    textAlign: "center" as const,
+    borderRadius: "4px",
+    padding: "2px 0",
+    flexShrink: 0,
+    margin: "2px 4px",
+  },
+  pipelineLegend: {
+    fontSize: "9px",
+    color: "#2a2a2a",
+    marginTop: "2px",
+    lineHeight: 1.4,
+  },
+
+  // metric row (Retriever)
+  row: { display: "flex", alignItems: "baseline", gap: "5px" },
+  metric: {
+    fontSize: "15px", fontWeight: 700, color: "#e0e0e0",
+    fontVariantNumeric: "tabular-nums", minWidth: "26px",
+  },
+  metricLabel: {
+    fontSize: "11px", color: "#888", flex: 1,
+    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+  },
+
+  // footer
   footer: {
     display: "flex",
     alignItems: "center",
     gap: "6px",
-    marginTop: "4px",
+    marginTop: "6px",
     paddingTop: "4px",
-    borderTop: "1px dashed #232323",
+    borderTop: "1px dashed #1e1e1e",
     flexWrap: "wrap",
   },
-  footerHint: {
+  footerHint: { fontSize: "10px", color: "#555", flex: 1 },
+  badge: {
     fontSize: "10px",
-    color: "#555",
-  },
-  footerBadge: {
-    fontSize: "10px",
-    color: "#888",
-    backgroundColor: "#1f1f1f",
-    padding: "1px 6px",
+    padding: "1px 7px",
     borderRadius: "8px",
   },
-  empty: {
-    fontSize: "11px",
-    color: "#555",
-    fontStyle: "italic",
-    padding: "4px 0",
-  },
-  pipelineBlock: {
-    display: "flex",
-    alignItems: "center",
-    gap: "4px",
-    marginTop: "8px",
-    paddingTop: "8px",
-    borderTop: "1px dashed #232323",
-    flexWrap: "nowrap",
-  },
-  pipelineStepBox: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: "1px",
-    padding: "4px 8px",
-    border: "1px solid #232323",
-    borderRadius: "4px",
-    backgroundColor: "#111",
-    minWidth: "58px",
-    flexShrink: 0,
-  },
-  pipelineStepLabel: {
-    fontSize: "9px",
-    textTransform: "uppercase" as const,
-    letterSpacing: "0.05em",
-    color: "#666",
-    fontWeight: 600,
-  },
-  pipelineStepCalls: {
-    fontSize: "13px",
-    fontWeight: 700,
-    color: "#e0e0e0",
-    fontVariantNumeric: "tabular-nums",
-  },
-  pipelineStepCost: {
-    fontSize: "9px",
-    color: "#10b981",
-    fontVariantNumeric: "tabular-nums",
-  },
-  pipelineArrow: {
-    fontSize: "10px",
-    color: "#333",
-    flexShrink: 0,
-  },
-  pipelineSpacer: {
-    flex: 1,
-  },
-  pipelineTotal: {
-    fontSize: "10px",
-    color: "#555",
-    fontVariantNumeric: "tabular-nums",
-    flexShrink: 0,
-  },
-  bucketRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    fontSize: "11px",
-  },
+
+  empty: { fontSize: "11px", color: "#555", fontStyle: "italic", padding: "4px 0" },
+
+  // bucket rows (Skip / Categories)
+  bucketRow: { display: "flex", alignItems: "center", gap: "6px", fontSize: "11px" },
   bucketLabel: {
-    color: "#9aa0a6",
-    width: "70px",
-    overflow: "hidden",
-    textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
-    flexShrink: 0,
+    color: "#9aa0a6", width: "70px", overflow: "hidden",
+    textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0,
   },
   bucketBarWrap: {
-    flex: 1,
-    height: "6px",
-    backgroundColor: "#1a1a1a",
-    borderRadius: "3px",
-    overflow: "hidden",
-    minWidth: "20px",
+    flex: 1, height: "6px", backgroundColor: "#1a1a1a",
+    borderRadius: "3px", overflow: "hidden", minWidth: "20px",
   },
-  bucketBar: {
-    height: "100%",
-    transition: "width 0.2s ease",
-  },
+  bucketBar: { height: "100%", transition: "width 0.2s ease" },
   bucketValue: {
-    fontVariantNumeric: "tabular-nums",
-    color: "#bbb",
-    width: "24px",
-    textAlign: "right",
-    flexShrink: 0,
+    fontVariantNumeric: "tabular-nums", color: "#bbb",
+    width: "24px", textAlign: "right" as const, flexShrink: 0,
   },
 };

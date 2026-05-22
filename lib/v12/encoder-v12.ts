@@ -68,8 +68,13 @@ export class EncoderV12 {
     this.intraTurn = new IntraTurnRelate(judge, opts.intraTurnCfg);
   }
 
-  async process(turn: string, sessionId: string): Promise<EncoderV12Result> {
+  async process(
+    turn: string,
+    sessionId: string,
+    onStep?: (step: "triage" | "classify" | "relate") => void
+  ): Promise<EncoderV12Result> {
     // Step 1: Triage
+    onStep?.("triage");
     const triage = await this.triage.evaluate(turn);
     const triageCost = triage.costUsd ?? 0;
 
@@ -98,6 +103,7 @@ export class EncoderV12 {
     }
 
     // Step 2: Classify
+    onStep?.("classify");
     const classified = await this.classify.run(turn, triage.reason);
     const classifyCost = classified.costUsd ?? 0;
 
@@ -161,7 +167,8 @@ export class EncoderV12 {
       memories.push({ ...draft, id: written.id });
     }
 
-    // Step 3b: Intra-turn relate (cost tracked by relate-judge internally)
+    // Step 3b: Intra-turn relate
+    onStep?.("relate");
     const nodes: MemoryNode[] = memories.map((m) => ({
       id: m.id,
       title: m.title,

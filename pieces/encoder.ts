@@ -40,6 +40,7 @@ export class EncoderPiece implements Piece {
       relate:   { calls: 0, costUsd: 0 },
     },
   };
+  private _activeStep: "triage" | "classify" | "relate" | null = null;
 
   constructor(
     private store: MnemosyneStore,
@@ -56,6 +57,7 @@ export class EncoderPiece implements Piece {
       ...this._stats,
       queueDepth: this.queue.length,
       processing: this.processing,
+      activeStep: this._activeStep,
       categoriesCount: { ...this._stats.categoriesCount },
       pipeline: {
         triage:   { ...this._stats.pipeline.triage },
@@ -181,7 +183,10 @@ export class EncoderPiece implements Piece {
       .filter(Boolean)
       .join("\n\n");
 
-    const result = await this.v12.encoder.process(turnText, turnId);
+    const result = await this.v12.encoder.process(turnText, turnId, (step) => {
+      this._activeStep = step;
+    });
+    this._activeStep = null;
     this._stats.turnsProcessed++;
 
     // Accumulate per-step spend

@@ -107,6 +107,7 @@ export interface RuntimeStats {
       classify: PipelineStepStats;
       relate:   PipelineStepStats;
     };
+    activeStep: "triage" | "classify" | "relate" | null;
   };
   retriever: {
     retrievals: number;
