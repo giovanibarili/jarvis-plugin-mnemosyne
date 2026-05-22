@@ -11,13 +11,19 @@ import {
   type WorkflowCandidate,
 } from "./types";
 
+export interface LLMCallResult {
+  text: string;
+  /** Real cost in USD computed from API usage tokens. */
+  costUsd: number;
+}
+
 export interface LLMClient {
   call(opts: {
     system: string;
     user: string;
     maxTokens?: number;
     model?: string;
-  }): Promise<string>;
+  }): Promise<LLMCallResult>;
 }
 
 export interface ExtractorResult {
@@ -34,6 +40,8 @@ const SLUG_RE = /^[a-z][a-z0-9-]{1,40}$/;
 export class Extractor {
   private promptCache = new Map<string, string>();
   private knownDynamic = new Set<string>(); // discovered at construction + after each generate
+  /** Accumulates real LLM cost (USD) across all calls within one extract() invocation. */
+  _costAccumulator = 0;
 
   constructor(
     private llm: LLMClient,
@@ -102,11 +110,12 @@ ${currentTurn}`;
     const prompt = template
       .replace("{{TURN}}", this.renderTurn(turn))
       .replace("{{KNOWN_DYNAMIC_CATEGORIES}}", this.renderKnownDynamicBlock());
-    const raw = await this.llm.call({
+    const { text: raw, costUsd: c0 } = await this.llm.call({
       system: prompt,
       user: "Extract.",
       maxTokens: 400,
     });
+    this._costAccumulator += c0;
     const parsed = JSON.parse(this.stripJsonFence(raw)) as TriageResult;
     parsed.proposed = parsed.proposed ?? [];
     return parsed;
@@ -122,11 +131,12 @@ ${currentTurn}`;
     const file = `extract-${category}.md`;
     const template = await this.loadPrompt(file);
     const prompt = template.replace("{{TURN}}", this.renderTurn(turn));
-    const raw = await this.llm.call({
+    const { text: raw, costUsd: c1 } = await this.llm.call({
       system: prompt,
       user: "Extract.",
       maxTokens: 800,
     });
+    this._costAccumulator += c1;
     const parsed = JSON.parse(this.stripJsonFence(raw));
     return (parsed.candidates ?? []).filter(
       (c: MemoryCandidate) => c.confidence >= this.minConfidence
@@ -136,11 +146,12 @@ ${currentTurn}`;
   async extractWorkflow(turn: TurnContext): Promise<WorkflowCandidate | null> {
     const template = await this.loadPrompt("extract-workflow.md");
     const prompt = template.replace("{{TURN}}", this.renderTurn(turn));
-    const raw = await this.llm.call({
+    const { text: raw, costUsd: c2 } = await this.llm.call({
       system: prompt,
       user: "Extract.",
       maxTokens: 2000,
     });
+    this._costAccumulator += c2;
     let parsed: any;
     try {
       parsed = JSON.parse(this.stripJsonFence(raw));
@@ -190,11 +201,12 @@ ${currentTurn}`;
       .replace(/\{\{CATEGORY_ID\}\}/g, id)
       .replace(/\{\{CATEGORY_DESCRIPTION\}\}/g, proposal.description.trim())
       .replace(/\{\{CATEGORY_HINT\}\}/g, proposal.hint.trim());
-    const generated = await this.llm.call({
+    const { text: generated, costUsd: c3 } = await this.llm.call({
       system: prompt,
       user: "Author the prompt now.",
       maxTokens: 800,
     });
+    this._costAccumulator += c3;
     const body = this.stripJsonFence(generated).trim();
     if (!body || !body.includes("{{TURN}}") || !body.includes(`"${id}"`)) {
       // Reject malformed output — keep the system safe rather than store junk.
@@ -207,9 +219,10 @@ ${currentTurn}`;
   }
 
   async extract(turn: TurnContext): Promise<ExtractorResult> {
+    this._costAccumulator = 0; // reset for this invocation
     const triage = await this.triage(turn);
     if (triage.present.length === 0) {
-      return { candidates: [], workflow: null, triage, costUsd: 0.0001 };
+      return { candidates: [], workflow: null, triage, costUsd: 0 };
     }
 
     // Resolve each proposed id: canonical / known dynamic / new (auto-author).
@@ -240,13 +253,9 @@ ${currentTurn}`;
       triage.present = accepted; // reflect reality in logs
     }
     if (accepted.length === 0) {
-      return {
-        candidates: [],
-        workflow: null,
-        triage,
-        costUsd: 0.0001,
-        newPromptsGenerated,
-      };
+      const costUsd = this._costAccumulator;
+      this._costAccumulator = 0;
+      return { candidates: [], workflow: null, triage, costUsd, newPromptsGenerated };
     }
 
     const memoryCategories = accepted.filter((c) => c !== "workflow");
@@ -270,9 +279,9 @@ ${currentTurn}`;
       workflow = results[results.length - 1] as WorkflowCandidate | null;
     }
 
-    // Prompt-authoring uses a small model; cost stays close to canonical path.
-    const promptGenCost = 0.0005 * newPromptsGenerated.length;
-    const costUsd = 0.0001 + 0.0003 * promises.length + promptGenCost;
+    // costUsd is accumulated by the LLMClient via the costAccumulator ref.
+    const costUsd = this._costAccumulator;
+    this._costAccumulator = 0;
     return { candidates, workflow, triage, costUsd, newPromptsGenerated };
   }
 

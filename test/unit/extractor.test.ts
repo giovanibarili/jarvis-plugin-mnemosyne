@@ -7,6 +7,9 @@ import { Extractor } from "../../lib/extractor";
 import type { LLMClient } from "../../lib/extractor";
 import type { TurnContext } from "../../lib/types";
 
+/** Wrap a raw JSON string (or any string) into an LLMCallResult for mocking. */
+const llmResult = (text: string) => ({ text, costUsd: 0 });
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const promptsDir = resolve(__dirname, "../../prompts");
@@ -27,9 +30,7 @@ describe("Extractor", () => {
     const llm: LLMClient = {
       call: vi
         .fn()
-        .mockResolvedValue(
-          '{"present": [], "skip_reason": "casual conversation"}'
-        ),
+        .mockResolvedValue(llmResult('{"present": [], "skip_reason": "casual conversation"}')),
     };
     const ext = new Extractor(llm, promptsDir);
     const result = await ext.triage(makeTurn());
@@ -41,12 +42,8 @@ describe("Extractor", () => {
     const llm: LLMClient = {
       call: vi
         .fn()
-        .mockResolvedValueOnce(
-          '{"present": ["preference"], "skip_reason": null}'
-        )
-        .mockResolvedValueOnce(
-          '{"candidates":[{"category":"preference","title":"x","content":"y","tags":[],"project":null,"confidence":0.9,"evidence":"y","visibility":"open"}]}'
-        ),
+        .mockResolvedValueOnce(llmResult('{"present": ["preference"], "skip_reason": null}'))
+        .mockResolvedValueOnce(llmResult('{"candidates":[{"category":"preference","title":"x","content":"y","tags":[],"project":null,"confidence":0.9,"evidence":"y","visibility":"open"}]}')),
     };
     const ext = new Extractor(llm, promptsDir);
     const result = await ext.extract(
@@ -61,7 +58,7 @@ describe("Extractor", () => {
     const llm: LLMClient = {
       call: vi
         .fn()
-        .mockResolvedValue('{"present": [], "skip_reason": "casual"}'),
+        .mockResolvedValue(llmResult('{"present": [], "skip_reason": "casual"}')),
     };
     const ext = new Extractor(llm, promptsDir);
     await ext.extract(makeTurn());
@@ -109,10 +106,8 @@ describe("Extractor", () => {
     const llm: LLMClient = {
       call: vi
         .fn()
-        .mockResolvedValueOnce(
-          '{"present": ["workflow"], "skip_reason": null}'
-        )
-        .mockResolvedValueOnce(wfJson),
+        .mockResolvedValueOnce(llmResult('{"present": ["workflow"], "skip_reason": null}'))
+        .mockResolvedValueOnce(llmResult(wfJson)),
     };
     const ext = new Extractor(llm, promptsDir);
     const result = await ext.extract(
@@ -129,12 +124,8 @@ describe("Extractor", () => {
     const llm: LLMClient = {
       call: vi
         .fn()
-        .mockResolvedValueOnce(
-          '{"present": ["preference"], "skip_reason": null}'
-        )
-        .mockResolvedValueOnce(
-          '{"candidates":[{"category":"preference","title":"x","content":"y","tags":[],"project":null,"confidence":0.4,"evidence":"","visibility":"open"}]}'
-        ),
+        .mockResolvedValueOnce(llmResult('{"present": ["preference"], "skip_reason": null}'))
+        .mockResolvedValueOnce(llmResult('{"candidates":[{"category":"preference","title":"x","content":"y","tags":[],"project":null,"confidence":0.4,"evidence":"","visibility":"open"}]}')),
     };
     const ext = new Extractor(llm, promptsDir);
     const result = await ext.extract(
@@ -188,9 +179,9 @@ describe("Extractor", () => {
       const llm: LLMClient = {
         call: vi
           .fn()
-          .mockResolvedValueOnce(triageJson)
-          .mockResolvedValueOnce(generatedPrompt)
-          .mockResolvedValueOnce(candJson),
+          .mockResolvedValueOnce(llmResult(triageJson))
+          .mockResolvedValueOnce(llmResult(generatedPrompt))
+          .mockResolvedValueOnce(llmResult(candJson)),
       };
       const ext = new Extractor(llm, scratchDir);
       await ext.init();
@@ -218,7 +209,7 @@ describe("Extractor", () => {
         skip_reason: null,
       });
       const llm: LLMClient = {
-        call: vi.fn().mockResolvedValueOnce(triageJson),
+        call: vi.fn().mockResolvedValueOnce(llmResult(triageJson)),
       };
       const ext = new Extractor(llm, scratchDir);
       await ext.init();
@@ -257,8 +248,8 @@ describe("Extractor", () => {
       const llm: LLMClient = {
         call: vi
           .fn()
-          .mockResolvedValueOnce(triageJson)
-          .mockResolvedValueOnce(candJson),
+          .mockResolvedValueOnce(llmResult(triageJson))
+          .mockResolvedValueOnce(llmResult(candJson)),
       };
       const ext = new Extractor(llm, scratchDir);
       await ext.init();

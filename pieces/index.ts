@@ -684,6 +684,8 @@ function makeLLMClient(ctx: PluginContext): LLMClient {
 
         let text = "";
         let errored: string | undefined;
+        let inputTokens = 0;
+        let outputTokens = 0;
 
         try {
           for await (const event of session.sendAndStream(user)) {
@@ -696,6 +698,8 @@ function makeLLMClient(ctx: PluginContext): LLMClient {
               errored = event.error ?? "Unknown LLM error";
               break;
             } else if (event.type === "message_complete") {
+              inputTokens = event.usage?.input_tokens ?? 0;
+              outputTokens = event.usage?.output_tokens ?? 0;
               break;
             }
           }
@@ -704,7 +708,10 @@ function makeLLMClient(ctx: PluginContext): LLMClient {
         }
 
         if (errored) throw new Error(errored);
-        return text;
+
+        // claude-haiku-3-5: $0.80/MTok input, $4.00/MTok output
+        const costUsd = (inputTokens / 1_000_000) * 0.80 + (outputTokens / 1_000_000) * 4.00;
+        return { text, costUsd };
       } finally {
         session.close();
         // Notify metrics-hud (and any other subscriber) that this ephemeral
