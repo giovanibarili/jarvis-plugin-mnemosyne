@@ -131,6 +131,20 @@ export interface TurnContext {
     user_message: string;
     assistant_response: string;
   }>;
+  /**
+   * When set, bypasses triage/classify/gate entirely.
+   * The content is written directly to the store with confidence=1.0
+   * and reinforced if a near-duplicate already exists.
+   * Set by mnemosyne_triage tool for explicit force-encoding.
+   */
+  force_store?: {
+    /** Short title for the memory. Defaults to first 80 chars of content. */
+    title?: string;
+    /** The memory content to store verbatim. */
+    content: string;
+    /** Category override. Defaults to 'preference'. */
+    category?: string;
+  };
 }
 
 export interface ScoreBreakdown {

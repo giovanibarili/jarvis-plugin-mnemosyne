@@ -1,9 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { EncoderPiece } from "../../pieces/encoder";
-import type { TurnContext, MemoryCandidate } from "../../lib/types";
-import type { Extractor, ExtractorResult } from "../../lib/extractor";
-import type { MnemosyneStore } from "../../lib/store";
-import type { Logger } from "../../lib/logger";
+import type { TurnContext } from "../../lib/types";
 
 function makeTurn(overrides: Partial<TurnContext> = {}): TurnContext {
   return {
@@ -16,174 +13,206 @@ function makeTurn(overrides: Partial<TurnContext> = {}): TurnContext {
   };
 }
 
-function makeCandidate(
-  overrides: Partial<MemoryCandidate> = {}
-): MemoryCandidate {
-  return {
-    category: "preference",
-    title: "prefer dark mode",
-    content: "User prefers dark mode UI.",
-    tags: ["ui"],
-    project: null,
-    confidence: 0.9,
-    evidence: "user said so",
-    visibility: "open",
-    ...overrides,
+function makeEncoder(overrides: { processResult?: any; sinkWrite?: any } = {}) {
+  const sinkWrite =
+    overrides.sinkWrite ??
+    vi.fn().mockImplementation(async (m: any) => ({ ...m, id: m.id ?? "written-id" }));
+
+  const processResult = overrides.processResult ?? {
+    skipped: false,
+    memories: [
+      {
+        id: "m1",
+        category: "preference",
+        title: "prefer dark mode",
+        content: "User prefers dark mode.",
+        evidence: "user said so",
+        origin_source: "user",
+        created_at: new Date().toISOString(),
+        session_id: "s1",
+        tags: [],
+        confidence: 0.9,
+      },
+    ],
+    intraTurnEdges: [],
   };
-}
 
-function buildEnv(opts: {
-  extractResult: ExtractorResult;
-  existing?: Array<{ title: string; content: string; category: string }>;
-}) {
-  const extractor = {
-    extract: vi.fn().mockResolvedValue(opts.extractResult),
-  } as unknown as Extractor;
+  const logExtraction = vi.fn().mockResolvedValue(undefined);
 
-  const writes: any[] = [];
-  const store = {
-    markdownStore: {
-      list: vi.fn().mockImplementation(async (_filter: any) => {
-        return opts.existing ?? [];
-      }),
-    },
-    write: vi.fn().mockImplementation(async (mem: any) => {
-      writes.push(mem);
-    }),
-  } as unknown as MnemosyneStore;
+  const v12Encoder = {
+    process: vi.fn().mockResolvedValue(processResult),
+    opts: { sink: { write: sinkWrite } },
+  };
 
-  const logEntries: any[] = [];
-  const logger = {
-    logExtraction: vi.fn().mockImplementation(async (entry: any) => {
-      logEntries.push(entry);
-    }),
-  } as unknown as Logger;
+  const piece = new EncoderPiece(
+    { write: sinkWrite, list: vi.fn().mockResolvedValue([]) } as any,
+    { logExtraction } as any,
+    { encoder: v12Encoder as any, relatePiece: undefined }
+  );
 
-  const piece = new EncoderPiece(extractor, store, logger);
-  return { piece, extractor, store, logger, writes, logEntries };
+  return { piece, sinkWrite, logExtraction, v12Process: v12Encoder.process };
 }
 
 async function flush(piece: EncoderPiece) {
-  // Wait until queue + processing both drain
-  await piece.stop();
+  await new Promise<void>((resolve) => {
+    const iv = setInterval(() => {
+      if ((piece as any).queue.length === 0 && !(piece as any).processing) {
+        clearInterval(iv);
+        resolve();
+      }
+    }, 10);
+  });
 }
 
-describe("EncoderPiece", () => {
-  it("enqueue → processTurn writes one Memory per candidate", async () => {
-    const cand1 = makeCandidate({ title: "t1", content: "c1" });
-    const cand2 = makeCandidate({
-      title: "t2",
-      content: "c2",
-      category: "code-pattern",
-    });
-    const env = buildEnv({
-      extractResult: {
-        candidates: [cand1, cand2],
-        workflow: null,
-        triage: { present: ["preference", "code-pattern"], skip_reason: null },
-        costUsd: 0.0007,
-      },
-    });
+// ── Normal path ───────────────────────────────────────────────────────────────
 
-    env.piece.enqueue(makeTurn());
-    await flush(env.piece);
-
-    expect(env.extractor.extract).toHaveBeenCalledTimes(1);
-    expect(env.store.write).toHaveBeenCalledTimes(2);
-    expect(env.writes[0]).toMatchObject({
-      title: "t1",
-      content: "c1",
-      category: "preference",
-      reinforcements: 0,
-      pinned: false,
-      promoted_at: null,
-      source_session: "s1",
-    });
-    expect(env.writes[1]).toMatchObject({
-      title: "t2",
-      content: "c2",
-      category: "code-pattern",
-    });
-    // Each Memory must get a fresh uuid
-    expect(env.writes[0].id).toBeTruthy();
-    expect(env.writes[1].id).toBeTruthy();
-    expect(env.writes[0].id).not.toBe(env.writes[1].id);
+describe("EncoderPiece — normal path", () => {
+  it("enqueue calls v12.encoder.process and increments stats", async () => {
+    const { piece, v12Process } = makeEncoder();
+    piece.enqueue(makeTurn());
+    await flush(piece);
+    expect(v12Process).toHaveBeenCalledOnce();
+    const stats = (piece as any)._stats;
+    expect(stats.turnsProcessed).toBe(1);
+    expect(stats.memoriesWritten).toBe(1);
+    expect(stats.turnsSkipped).toBe(0);
   });
 
-  it("logs a pass=2 extraction entry per turn with avg confidence", async () => {
-    const env = buildEnv({
-      extractResult: {
-        candidates: [
-          makeCandidate({ confidence: 0.8 }),
-          makeCandidate({ title: "x", content: "y", confidence: 1.0 }),
-        ],
-        workflow: null,
-        triage: { present: ["preference"], skip_reason: null },
-        costUsd: 0.0004,
-      },
+  it("skipped result increments turnsSkipped, not memoriesWritten", async () => {
+    const { piece } = makeEncoder({
+      processResult: { skipped: true, memories: [], intraTurnEdges: [] },
     });
-
-    env.piece.enqueue(makeTurn({ session_id: "abc", timestamp: 42 }));
-    await flush(env.piece);
-
-    expect(env.logger.logExtraction).toHaveBeenCalledTimes(1);
-    const entry = env.logEntries[0];
-    expect(entry).toMatchObject({
-      turn_id: "abc-42",
-      pass: 2,
-      categories: ["preference"],
-      candidates_emitted: 2,
-      cost_usd: 0.0004,
-      skip_reason: null,
-    });
-    expect(entry.confidence_avg).toBeCloseTo(0.9, 5);
+    piece.enqueue(makeTurn());
+    await flush(piece);
+    const stats = (piece as any)._stats;
+    expect(stats.turnsProcessed).toBe(1);
+    expect(stats.turnsSkipped).toBe(1);
+    expect(stats.memoriesWritten).toBe(0);
   });
 
-  it("skips when extractor returns no candidates", async () => {
-    const env = buildEnv({
-      extractResult: {
-        candidates: [],
-        workflow: null,
-        triage: { present: [], skip_reason: "casual conversation" },
-        costUsd: 0.0001,
-      },
-    });
-
-    env.piece.enqueue(makeTurn());
-    await flush(env.piece);
-
-    expect(env.store.write).not.toHaveBeenCalled();
-    // pass=2 entry still emitted, with skip_reason from triage
-    expect(env.logger.logExtraction).toHaveBeenCalledTimes(1);
-    expect(env.logEntries[0]).toMatchObject({
-      pass: 2,
-      candidates_emitted: 0,
-      confidence_avg: 0,
-      skip_reason: "casual conversation",
-    });
+  it("queues multiple turns and processes them sequentially", async () => {
+    const { piece, v12Process } = makeEncoder();
+    piece.enqueue(makeTurn());
+    piece.enqueue(makeTurn());
+    piece.enqueue(makeTurn());
+    await flush(piece);
+    expect(v12Process).toHaveBeenCalledTimes(3);
+    expect((piece as any)._stats.turnsProcessed).toBe(3);
   });
 
-  it("dedups against markdown store: existing title+content+category is skipped", async () => {
-    const cand = makeCandidate({
-      category: "preference",
-      title: "dup",
-      content: "same",
+  it("turnsErrored incremented when process throws", async () => {
+    const { piece, logExtraction } = makeEncoder({
+      processResult: undefined,
     });
-    const env = buildEnv({
-      extractResult: {
-        candidates: [cand],
-        workflow: null,
-        triage: { present: ["preference"], skip_reason: null },
-        costUsd: 0.0004,
-      },
-      existing: [
-        { category: "preference", title: "dup", content: "same" } as any,
-      ],
-    });
+    (piece as any).v12.encoder.process = vi.fn().mockRejectedValue(new Error("boom"));
+    piece.enqueue(makeTurn());
+    await flush(piece);
+    expect((piece as any)._stats.turnsErrored).toBe(1);
+    expect(logExtraction).toHaveBeenCalledWith(
+      expect.objectContaining({ skip_reason: expect.stringContaining("boom") })
+    );
+  });
+});
 
-    env.piece.enqueue(makeTurn());
-    await flush(env.piece);
+// ── force_store fast path ─────────────────────────────────────────────────────
 
-    expect(env.store.write).not.toHaveBeenCalled();
+describe("force_store fast path", () => {
+  it("writes directly to sink, bypasses v12.encoder.process, stats incremented", async () => {
+    const { piece, sinkWrite, v12Process, logExtraction } = makeEncoder();
+
+    piece.enqueue(
+      makeTurn({
+        force_store: {
+          content:
+            "SAA is the core settlement engine — 17 operation types, FIFO ordering via EC",
+          category: "architecture-decision",
+        },
+      })
+    );
+    await flush(piece);
+
+    expect(v12Process).not.toHaveBeenCalled();
+    expect(sinkWrite).toHaveBeenCalledOnce();
+
+    const written = sinkWrite.mock.calls[0][0];
+    expect(written.content).toBe(
+      "SAA is the core settlement engine — 17 operation types, FIFO ordering via EC"
+    );
+    expect(written.category).toBe("architecture-decision");
+    expect(written.confidence).toBe(1.0);
+    expect(written.origin_source).toBe("user");
+
+    expect(logExtraction).toHaveBeenCalledOnce();
+    const log = logExtraction.mock.calls[0][0];
+    expect(log.skip_reason).toBeNull();
+    expect(log.confidence_avg).toBe(1.0);
+
+    const stats = (piece as any)._stats;
+    expect(stats.turnsProcessed).toBe(1);
+    expect(stats.memoriesWritten).toBe(1);
+    expect(stats.categoriesCount["architecture-decision"]).toBe(1);
+  });
+
+  it("uses first 80 chars as title when title is omitted", async () => {
+    const { piece, sinkWrite } = makeEncoder();
+    const longContent = "A".repeat(120);
+    piece.enqueue(makeTurn({ force_store: { content: longContent } }));
+    await flush(piece);
+    const written = sinkWrite.mock.calls[0][0];
+    expect(written.title.length).toBe(80);
+    expect(written.category).toBe("preference"); // default
+  });
+
+  it("uses provided title and category", async () => {
+    const { piece, sinkWrite } = makeEncoder();
+    piece.enqueue(
+      makeTurn({
+        force_store: {
+          title: "Custom Title",
+          content: "Some content",
+          category: "mental-model",
+        },
+      })
+    );
+    await flush(piece);
+    const written = sinkWrite.mock.calls[0][0];
+    expect(written.title).toBe("Custom Title");
+    expect(written.category).toBe("mental-model");
+  });
+
+  it("calls relatePiece.handleNewMemory when wired", async () => {
+    const handleNewMemory = vi.fn().mockResolvedValue(undefined);
+    const { piece, sinkWrite } = makeEncoder();
+    (piece as any).v12.relatePiece = { handleNewMemory };
+
+    piece.enqueue(makeTurn({ force_store: { content: "test memory" } }));
+    await flush(piece);
+
+    expect(handleNewMemory).toHaveBeenCalledOnce();
+    const call = handleNewMemory.mock.calls[0][0];
+    expect(call.id).toBe((await sinkWrite.mock.results[0].value).id);
+    expect(call.content).toBe("test memory");
+  });
+});
+
+// ── getStats ──────────────────────────────────────────────────────────────────
+
+describe("getStats", () => {
+  it("returns live queue depth and processing flag", async () => {
+    const { piece } = makeEncoder();
+    // Before any enqueue: queue=0, processing=false
+    const before = piece.getStats();
+    expect(before.queueDepth).toBe(0);
+    expect(before.processing).toBe(false);
+  });
+
+  it("categoriesCount is a shallow copy (no shared mutation)", async () => {
+    const { piece } = makeEncoder();
+    piece.enqueue(makeTurn());
+    await flush(piece);
+    const s1 = piece.getStats();
+    s1.categoriesCount["injected"] = 999;
+    const s2 = piece.getStats();
+    expect(s2.categoriesCount["injected"]).toBeUndefined();
   });
 });

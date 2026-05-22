@@ -13,12 +13,12 @@ export function buildMnemosyneTriageTool(encoder: EncoderPiece): CapabilityDefin
   return {
     name: "mnemosyne_triage",
     description:
-      "Send a prompt through the full Mnemosyne extraction pipeline " +
-      "(triage → classify → gate → store). Use to force-encode an insight, " +
-      "decision, or piece of knowledge that should be remembered. " +
-      "The text is treated as a synthetic turn: user_message = prompt, " +
-      "assistant_response = '' unless you provide one. " +
-      "Returns immediately — extraction runs asynchronously in the encoder queue.",
+      "Force-encode a prompt directly into Mnemosyne long-term memory. " +
+      "Bypasses triage/classify/gate entirely — no LLM inference, no skip risk. " +
+      "Content is written with confidence=1.0 and immediately reinforced if a " +
+      "near-duplicate already exists. Use when you have already decided that " +
+      "something is worth remembering — insights, decisions, preferences, domain knowledge. " +
+      "Returns immediately; write runs async in the encoder queue.",
     input_schema: {
       type: "object",
       properties: {
@@ -62,6 +62,12 @@ export function buildMnemosyneTriageTool(encoder: EncoderPiece): CapabilityDefin
         assistant_response: assistantResponse,
         tool_calls: [],
         timestamp: Date.now(),
+        // Bypass triage/classify/gate — the caller has already decided this
+        // content is worth storing. Write directly with confidence=1.0.
+        force_store: {
+          content: prompt,
+          // Let the encoder derive the title from the first 80 chars
+        },
       };
 
       encoder.enqueue(turn);

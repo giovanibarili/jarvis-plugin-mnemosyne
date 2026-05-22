@@ -370,28 +370,18 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
 
   // 6. Build pipelines
   const llm = makeLLMClient(ctx);
-  const extractor = new Extractor(
-    llm,
-    join(__dirname, "../prompts"),
-    config.encoder.min_confidence
-  );
-  // Discover already-authored dynamic categories so the triage prompt lists them.
-  await extractor.init();
   const conflictDetector = new ConflictDetector(llm, chroma, neo4j, {
     similarityThreshold: config.consolidator.conflict_similarity_threshold,
     promptsDir: join(__dirname, "../prompts"),
   });
-  const relationLinker = new SemanticRelationLinker(llm, chroma, neo4j, {
-    similarityThreshold: config.encoder.relation_similarity_threshold ?? 0.82,
-    topK: config.encoder.relation_top_k ?? 8,
-    promptsDir: join(__dirname, "../prompts"),
-  });
   const reranker = new Reranker(config.retriever.rerank_weights);
-  // ReplayEngine constructed for Task 13 tools to consume; not run in Task 12
+  // ReplayEngine constructed for Task 13 tools to consume
   const replayEngine = new ReplayEngine({ logger });
 
-  // 7. Construct pieces
-  const encoder = new EncoderPiece(extractor, store, logger, relationLinker);
+  // 7. Construct pieces — v12 pipeline is the only path
+  // EncoderPiece is constructed with a placeholder hook; wireV12Pipeline
+  // replaces it with the real EncoderV12 + RelatePiece after building them.
+  const encoder = new EncoderPiece(store, logger, { encoder: null as any });
   const observer = new ObserverPiece(
     (turn) => encoder.enqueue(turn),
     config.encoder.context_window_size ?? 10
@@ -411,7 +401,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
           maxChildren: config.graph_retrieval.max_children,
         }
       : undefined,
-  }, relationLinker);
+  });
   const consolidator = new ConsolidatorPiece(store, conflictDetector, logger, {
     cron: config.consolidator.cron,
     skipIfActiveWithinMinutes: config.consolidator.skip_if_active_within_minutes,
@@ -425,16 +415,8 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // were created above in this same bootstrap function; safe to wire now.
   panel.setStatsSources(encoder, retriever);
 
-  // 7b. v1.2 TRIPLET pipeline — gated by pipeline.v12_enabled
-  // Defaults to false so v1.1 keeps running unchanged. When true, we build
-  // EncoderV12 (triage → classify → gate → intra-turn relate) and a
-  // RelatePiece (cross-store judge), then inject them into the existing
-  // EncoderPiece. EncoderPiece.processTurn delegates to v12 whenever the
-  // hook is set; the v1.1 Extractor path remains intact and is exercised
-  // by every existing test.
-  if (config?.pipeline?.v12_enabled === true) {
-    await wireV12Pipeline({ encoder, store, chroma, neo4j, llm, logger, config });
-  }
+  // 7b. Wire the pipeline (always — no feature flag)
+  await wireV12Pipeline({ encoder, store, chroma, neo4j, llm, logger, config });
 
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
