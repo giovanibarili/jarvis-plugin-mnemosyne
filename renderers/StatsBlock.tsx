@@ -91,8 +91,8 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
 
       {!collapsed ? (
         <div style={styles.grid}>
-          {/* ── Encoder ── */}
-          <div style={styles.card}>
+          {/* ── Encoder ── full width */}
+          <div style={{ ...styles.card, ...styles.cardFull }}>
             <div style={styles.cardTitle}>📥 Encoder</div>
             <div style={styles.row}>
               <span style={styles.metric}>{e.turnsProcessed}</span>
@@ -119,16 +119,19 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
                 <span style={styles.metricLabel}>errors</span>
               </div>
             ) : null}
-            {/* Pipeline spend + queue per step */}
+            {/* Pipeline spend inline — triage → classify → relate */}
             {e.pipeline ? (
               <div style={styles.pipelineBlock}>
-                <PipelineRow step="triage"   stats={e.pipeline.triage}   queue={e.processing ? e.queueDepth : 0} />
-                <PipelineRow step="classify" stats={e.pipeline.classify} queue={0} />
-                <PipelineRow step="relate"   stats={e.pipeline.relate}   queue={0} />
+                <PipelineStep label="triage"   stats={e.pipeline.triage}   active={e.processing && e.queueDepth > 0} />
+                <span style={styles.pipelineArrow}>→</span>
+                <PipelineStep label="classify" stats={e.pipeline.classify} active={false} />
+                <span style={styles.pipelineArrow}>→</span>
+                <PipelineStep label="relate"   stats={e.pipeline.relate}   active={false} />
+                <span style={styles.pipelineSpacer} />
+                <span style={styles.pipelineTotal}>{fmtCost(e.costUsd)} total</span>
               </div>
             ) : null}
             <div style={styles.footer}>
-              <span style={styles.footerHint}>{fmtCost(e.costUsd)} total</span>
               <span style={{
                 ...styles.footerBadge,
                 color: e.processing ? "#10b981" : "#555",
@@ -224,15 +227,12 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
   );
 }
 
-function PipelineRow({ step, stats, queue }: { step: string; stats: PipelineStepStats; queue: number }) {
+function PipelineStep({ label, stats, active }: { label: string; stats: PipelineStepStats; active: boolean }) {
   return (
-    <div style={styles.pipelineRow}>
-      <span style={styles.pipelineStep}>{step}</span>
-      <span style={styles.pipelineCalls}>{stats.calls}×</span>
-      <span style={styles.pipelineCost}>{fmtCost(stats.costUsd)}</span>
-      {queue > 0 ? (
-        <span style={styles.pipelineQueue}>q:{queue}</span>
-      ) : null}
+    <div style={{ ...styles.pipelineStepBox, borderColor: active ? "#10b981" : "#232323" }}>
+      <span style={{ ...styles.pipelineStepLabel, color: active ? "#10b981" : "#666" }}>{label}</span>
+      <span style={styles.pipelineStepCalls}>{stats.calls}×</span>
+      <span style={styles.pipelineStepCost}>{fmtCost(stats.costUsd)}</span>
     </div>
   );
 }
@@ -301,9 +301,12 @@ const styles: Record<string, any> = {
   },
   grid: {
     display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
     gap: "8px",
     padding: "10px",
+  },
+  cardFull: {
+    gridColumn: "1 / -1",
   },
   card: {
     display: "flex",
@@ -376,37 +379,54 @@ const styles: Record<string, any> = {
   },
   pipelineBlock: {
     display: "flex",
-    flexDirection: "column",
-    gap: "2px",
-    marginTop: "6px",
-    paddingTop: "6px",
-    borderTop: "1px dashed #232323",
-  },
-  pipelineRow: {
-    display: "flex",
     alignItems: "center",
-    gap: "6px",
-    fontSize: "10px",
+    gap: "4px",
+    marginTop: "8px",
+    paddingTop: "8px",
+    borderTop: "1px dashed #232323",
+    flexWrap: "nowrap",
   },
-  pipelineStep: {
+  pipelineStepBox: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: "1px",
+    padding: "4px 8px",
+    border: "1px solid #232323",
+    borderRadius: "4px",
+    backgroundColor: "#111",
+    minWidth: "58px",
+    flexShrink: 0,
+  },
+  pipelineStepLabel: {
+    fontSize: "9px",
+    textTransform: "uppercase" as const,
+    letterSpacing: "0.05em",
     color: "#666",
-    width: "48px",
-    flexShrink: 0,
+    fontWeight: 600,
   },
-  pipelineCalls: {
-    color: "#888",
-    width: "24px",
-    textAlign: "right" as const,
+  pipelineStepCalls: {
+    fontSize: "13px",
+    fontWeight: 700,
+    color: "#e0e0e0",
     fontVariantNumeric: "tabular-nums",
-    flexShrink: 0,
   },
-  pipelineCost: {
+  pipelineStepCost: {
+    fontSize: "9px",
     color: "#10b981",
     fontVariantNumeric: "tabular-nums",
+  },
+  pipelineArrow: {
+    fontSize: "10px",
+    color: "#333",
+    flexShrink: 0,
+  },
+  pipelineSpacer: {
     flex: 1,
   },
-  pipelineQueue: {
-    color: "#f59e0b",
+  pipelineTotal: {
+    fontSize: "10px",
+    color: "#555",
     fontVariantNumeric: "tabular-nums",
     flexShrink: 0,
   },
