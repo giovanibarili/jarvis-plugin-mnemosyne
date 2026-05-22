@@ -18,6 +18,7 @@ import MemoryCard from "./MemoryCard";
 import PreflightErrorPanel from "./PreflightErrorPanel";
 import WorkflowReplayDialog from "./WorkflowReplayDialog";
 import GraphTab from "./GraphTab";
+import PromptsTab from "./PromptsTab";
 import StatsBlock from "./StatsBlock";
 import type {
   Memory,
@@ -29,7 +30,7 @@ import type {
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
 
-type ActiveTab = "list" | "graph";
+type ActiveTab = "list" | "graph" | "categories";
 
 interface Props {
   state: {
@@ -260,6 +261,15 @@ export default function MnemosynePanel({ state }: Props) {
         >
           Graph
         </button>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "categories" ? styles.tabActive : {}),
+          }}
+          onClick={() => setActiveTab("categories")}
+        >
+          Categories
+        </button>
       </div>
 
       {activeTab === "list" ? (
@@ -320,16 +330,18 @@ export default function MnemosynePanel({ state }: Props) {
               ))
             )}
           </div>
-        ) : (
+        ) : activeTab === "graph" ? (
           <GraphTab
             memories={memories}
             selectedId={selectedId}
             onSelect={(id) => setSelectedId(id)}
             projects={projects}
           />
+        ) : (
+          <PromptsTab />
         )}
 
-        {selected ? (
+        {selected && activeTab !== "categories" ? (
           <div style={styles.detail}>
             <div style={styles.detailHeader}>
               <div style={styles.detailTitle}>{selected.title}</div>
@@ -391,9 +403,13 @@ export default function MnemosynePanel({ state }: Props) {
               ↻ Rebuild indexes
             </a>
           </>
-        ) : (
+        ) : activeTab === "graph" ? (
           <span style={styles.tabHint}>
             bolt://127.0.0.1:7687 · live graph · D9
+          </span>
+        ) : (
+          <span style={styles.tabHint}>
+            prompts dir: {"{plugin}"}/prompts/ · edits take effect on next extraction
           </span>
         )}
         {data.error ? (

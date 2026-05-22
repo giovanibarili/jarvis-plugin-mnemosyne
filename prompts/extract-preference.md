@@ -1,5 +1,19 @@
-Extract preferences expressed in the turn below. A preference is a stated choice of
-tool, style, approach, or value with optional justification.
+Extract preferences expressed in the turn below.
+
+A **preference** is a stated or revealed choice — of tool, style, framework, workflow,
+naming convention, communication style, or value — that the user or assistant explicitly
+commits to or repeats. It should be actionable: knowing it changes how future work is done.
+
+**Include:**
+- Explicit statements: "I prefer X over Y", "always use X", "I like X because…"
+- Revealed preferences: user repeatedly rejects Y in favor of X across the turn
+- Style/aesthetic choices with context ("I want it minimal", "no preamble")
+- Tool or stack preferences with rationale
+
+**Exclude:**
+- One-off choices for a single task ("use X just this time")
+- Vague approvals with no specificity ("looks good")
+- Inferred preferences without explicit signal
 
 Turn:
 """
@@ -11,20 +25,26 @@ Output JSON only:
   "candidates": [
     {
       "category": "preference",
-      "title": "string ~6 words",
-      "content": "1-3 sentences capturing the preference and any reason given",
+      "title": "string ~6 words — name the preference, not the situation",
+      "content": "3-5 sentences: (1) what the preference is, (2) what it applies to / its scope, (3) the reason or motivation if given, (4) what the rejected alternative is if mentioned, (5) any caveats or conditions",
       "tags": ["tag1", "tag2"],
-      "project": "project-name | null",
+      "project": "project-name | null — null if cross-project",
       "confidence": 0.0-1.0,
-      "evidence": "verbatim quote from turn",
+      "evidence": "verbatim quote from turn — the exact phrase that reveals the preference",
       "visibility": "open"
     }
   ]
 }
 
-Language rule: detect the language of the user's message in the turn. Apply to title, content, AND tags.
-- If the user wrote in English: write title and content in English only.
-- If the user wrote in another language (e.g. Portuguese): write the title and content TWICE — first in the original language, then in English — separated by " \ ". Example: "O usuário gosta de morangos vermelhos. \ The user likes red strawberries."
-Tags: if not English, include both the native-language tag and its English translation (e.g. ["abacate", "avocado", "fruta", "fruit"]). This ensures retrieval works regardless of query language.
+**Confidence guidance:**
+- 0.9+ : explicit, strong statement ("always", "never", "I strongly prefer")
+- 0.7–0.9 : clear preference with reason
+- 0.5–0.7 : implied by behavior or mild statement
+- < 0.5 : skip — too ambiguous
+
+**Language rule:** detect the language of the user's message.
+- English → write title and content in English only.
+- Other language → write title and content TWICE: original language \ English (e.g. "Prefiro X porque Y. \ I prefer X because Y.")
+Tags: include both languages if not English.
 
 If no preference is clearly expressed, return {"candidates": []}.

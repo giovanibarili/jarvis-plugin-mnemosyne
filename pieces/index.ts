@@ -547,6 +547,45 @@ function registerHttpRoutes(
     }
   });
 
+  // GET /prompts — list all extract-*.md and triage.md files with content
+  ctx.registerRoute("GET", `${base}/prompts`, async (_req: any, res: any) => {
+    try {
+      const promptsDir = join(ctx.pluginDir, "prompts");
+      const files = await fs.readdir(promptsDir);
+      const extractFiles = files.filter((f) => f.endsWith(".md") && f.startsWith("extract-"));
+      const prompts = await Promise.all(
+        extractFiles.sort().map(async (name) => {
+          const content = await fs.readFile(join(promptsDir, name), "utf-8");
+          const category = name.replace(/^extract-/, "").replace(/\.md$/, "");
+          return { name, category, content };
+        })
+      );
+      jsonResponse(res, 200, { prompts });
+    } catch (e) {
+      jsonResponse(res, 500, { ok: false, error: String(e) });
+    }
+  });
+
+  // PUT /prompts/<name> — save a prompt file (name extracted from URL suffix)
+  ctx.registerRoute("PUT", `${base}/prompts/`, async (req: any, res: any) => {
+    try {
+      const url: string = req.url ?? "";
+      const prefix = `${base}/prompts/`;
+      const name = decodeURIComponent(url.slice(url.indexOf(prefix) + prefix.length).split("?")[0]);
+      if (!name.endsWith(".md") || !name.startsWith("extract-") || name.includes("/") || name.includes("..")) {
+        return jsonResponse(res, 400, { ok: false, error: "invalid prompt name" });
+      }
+      const body = await readJsonBody(req);
+      const content = typeof body?.content === "string" ? body.content : null;
+      if (content === null) return jsonResponse(res, 400, { ok: false, error: "missing content" });
+      const promptsDir = join(ctx.pluginDir, "prompts");
+      await fs.writeFile(join(promptsDir, name), content, "utf-8");
+      jsonResponse(res, 200, { ok: true });
+    } catch (e) {
+      jsonResponse(res, 500, { ok: false, error: String(e) });
+    }
+  });
+
   ctx.registerRoute("POST", `${base}/rebuild-indexes`, (_req: any, res: any) => {
     // Index rebuild is a long-running script (scripts/rebuild-indexes.ts).
     // Surfacing it through the HUD requires a job-runner we don't have yet,

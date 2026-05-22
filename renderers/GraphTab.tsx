@@ -68,19 +68,64 @@ interface Props {
   projects: string[];
 }
 
-// Same palette as MemoryCard — keeps category recognition consistent
-// across the List and Graph tabs.
-const CATEGORY_COLOR: Record<Category, string> = {
-  "code-pattern": "#3b82f6",
-  preference: "#8b5cf6",
-  "architecture-decision": "#10b981",
-  "mental-model": "#f59e0b",
-  glossary: "#6366f1",
-  "anti-pattern": "#ef4444",
-  workflow: "#ec4899",
-};
+// 50-color palette — each category gets a stable color by index.
+// First 10 entries are pinned to well-known categories; the rest are
+// reserved for dynamic categories discovered at runtime.
+const COLOR_PALETTE: string[] = [
+  "#3b82f6", // 0  code-pattern    blue
+  "#8b5cf6", // 1  preference      violet
+  "#10b981", // 2  architecture-decision  emerald
+  "#f59e0b", // 3  mental-model    amber
+  "#6366f1", // 4  glossary        indigo
+  "#ef4444", // 5  anti-pattern    red
+  "#ec4899", // 6  workflow        pink
+  "#06b6d4", // 7  convention      cyan
+  "#f97316", // 8  entities        orange
+  "#a3e635", // 9  memory          lime
+  "#14b8a6", // 10
+  "#a855f7", // 11
+  "#22c55e", // 12
+  "#e879f9", // 13
+  "#fb923c", // 14
+  "#34d399", // 15
+  "#f472b6", // 16
+  "#60a5fa", // 17
+  "#fbbf24", // 18
+  "#4ade80", // 19
+  "#c084fc", // 20
+  "#38bdf8", // 21
+  "#f87171", // 22
+  "#2dd4bf", // 23
+  "#fb7185", // 24
+  "#a78bfa", // 25
+  "#86efac", // 26
+  "#fde68a", // 27
+  "#bfdbfe", // 28
+  "#ddd6fe", // 29
+  "#bbf7d0", // 30
+  "#fecdd3", // 31
+  "#e0f2fe", // 32
+  "#fef3c7", // 33
+  "#d1fae5", // 34
+  "#ede9fe", // 35
+  "#fee2e2", // 36
+  "#ccfbf1", // 37
+  "#fae8ff", // 38
+  "#ecfdf5", // 39
+  "#ff6b6b", // 40
+  "#ffd93d", // 41
+  "#6bcb77", // 42
+  "#4d96ff", // 43
+  "#c77dff", // 44
+  "#ff9f1c", // 45
+  "#2ec4b6", // 46
+  "#e71d36", // 47
+  "#ff9f51", // 48
+  "#b5e48c", // 49
+];
 
-const ALL_CATEGORIES: Category[] = [
+// Pinned categories always get their designated palette slot.
+const PINNED_CATEGORIES: string[] = [
   "code-pattern",
   "preference",
   "architecture-decision",
@@ -88,7 +133,54 @@ const ALL_CATEGORIES: Category[] = [
   "glossary",
   "anti-pattern",
   "workflow",
+  "convention",
+  "entities",
+  "memory",
 ];
+
+// Runtime map: category → color. Pinned are seeded immediately;
+// dynamic categories are assigned the next available palette slot.
+const CATEGORY_COLOR: Record<string, string> = {};
+for (let i = 0; i < PINNED_CATEGORIES.length; i++) {
+  CATEGORY_COLOR[PINNED_CATEGORIES[i]] = COLOR_PALETTE[i];
+}
+let _nextPaletteSlot = PINNED_CATEGORIES.length;
+
+function getCategoryColor(cat: string): string {
+  if (!CATEGORY_COLOR[cat]) {
+    CATEGORY_COLOR[cat] = COLOR_PALETTE[_nextPaletteSlot % COLOR_PALETTE.length];
+    _nextPaletteSlot++;
+  }
+  return CATEGORY_COLOR[cat];
+}
+
+// Fetch all distinct categories from Neo4j via the HTTP API.
+// Returns them sorted: pinned first, then dynamic alphabetically.
+async function fetchAllCategories(): Promise<string[]> {
+  try {
+    const res = await fetch("http://127.0.0.1:7474/db/neo4j/tx/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Basic bmVvNGo6" },
+      body: JSON.stringify({
+        statements: [{ statement: "MATCH (m:Memory) WHERE m.category IS NOT NULL RETURN DISTINCT m.category AS cat ORDER BY cat" }],
+      }),
+    });
+    if (!res.ok) return PINNED_CATEGORIES.slice();
+    const data = await res.json();
+    const rows: string[] = data?.results?.[0]?.data?.map((r: any) => r.row?.[0]).filter(Boolean) ?? [];
+    // Ensure pinned come first, then append any new dynamic ones
+    const seen = new Set(rows);
+    const ordered = [...PINNED_CATEGORIES.filter((c) => seen.has(c)), ...rows.filter((c) => !PINNED_CATEGORIES.includes(c))];
+    // Pre-assign colors for all discovered categories
+    for (const c of ordered) getCategoryColor(c);
+    return ordered;
+  } catch {
+    return PINNED_CATEGORIES.slice();
+  }
+}
+
+// Initial static list — replaced at runtime by fetchAllCategories().
+const ALL_CATEGORIES_STATIC: string[] = [...PINNED_CATEGORIES];
 
 type TimeWindow = "24h" | "7d" | "30d" | "all";
 
@@ -202,6 +294,18 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
   // Bumped on Refresh / Reset to force the (re)render effect to re-run
   // even when the filter object is reference-equal.
   const [renderTick, setRenderTick] = useState(0);
+  // Dynamic category list — fetched from Neo4j on mount and Refresh.
+  const [allCategories, setAllCategories] = useState<string[]>(ALL_CATEGORIES_STATIC);
+
+  // Fetch categories on mount
+  useEffect(() => {
+    fetchAllCategories().then(setAllCategories);
+  }, []);
+
+  // Re-fetch categories on Refresh (renderTick changes)
+  useEffect(() => {
+    if (renderTick > 0) fetchAllCategories().then(setAllCategories);
+  }, [renderTick]);
 
   // Initialize / re-initialize neovis whenever filters or renderTick change.
   useEffect(() => {
@@ -283,10 +387,8 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
                   return lines.join("\n");
                 },
                 color: (node: any) => {
-                  const cat = node?.properties?.category as Category | undefined;
-                  return cat && CATEGORY_COLOR[cat]
-                    ? CATEGORY_COLOR[cat]
-                    : "#888888";
+                  const cat = node?.properties?.category as string | undefined;
+                  return cat ? getCategoryColor(cat) : "#888888";
                 },
                 title: (node: any) => {
                   // neovis passes the vis.js node object to function callbacks;
@@ -570,16 +672,14 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
 
         <div style={styles.controlsRow}>
           <span style={styles.label}>categories</span>
-          {ALL_CATEGORIES.map((c) => {
-            const active = filters.categories.has(c);
-            const color = CATEGORY_COLOR[c];
+          {allCategories.map((c) => {
+            const active = filters.categories.has(c as Category);
+            const color = getCategoryColor(c);
             return (
               <button
                 key={c}
                 style={{
                   ...styles.chip,
-                  // Inactive: tinted border in category color (visible but muted).
-                  // Active: filled with category color.
                   borderColor: color,
                   ...(active
                     ? {
@@ -593,7 +693,7 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
                         color: color,
                       }),
                 }}
-                onClick={() => toggleCategory(c)}
+                onClick={() => toggleCategory(c as Category)}
                 disabled={filters.onlyWorkflows}
                 title={filters.onlyWorkflows
                   ? "Disabled in workflows-only mode"
