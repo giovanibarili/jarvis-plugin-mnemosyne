@@ -40,6 +40,7 @@ function makeEncoder(overrides: { processResult?: any; sinkWrite?: any } = {}) {
   const logExtraction = vi.fn().mockResolvedValue(undefined);
 
   const v12Encoder = {
+    // process(turn, sessionId, onStep, skipTriage) — capture all args
     process: vi.fn().mockResolvedValue(processResult),
     opts: { sink: { write: sinkWrite } },
   };
@@ -114,84 +115,31 @@ describe("EncoderPiece — normal path", () => {
   });
 });
 
-// ── force_store fast path ─────────────────────────────────────────────────────
+// ── skip_triage path ──────────────────────────────────────────────────────────
 
-describe("force_store fast path", () => {
-  it("writes directly to sink, bypasses v12.encoder.process, stats incremented", async () => {
-    const { piece, sinkWrite, v12Process, logExtraction } = makeEncoder();
+describe("skip_triage path", () => {
+  it("calls v12.encoder.process with skipTriage=true, skips triage LLM", async () => {
+    const { piece, v12Process } = makeEncoder();
 
-    piece.enqueue(
-      makeTurn({
-        force_store: {
-          content:
-            "SAA is the core settlement engine — 17 operation types, FIFO ordering via EC",
-          category: "architecture-decision",
-        },
-      })
-    );
+    piece.enqueue(makeTurn({ skip_triage: true }));
     await flush(piece);
 
-    expect(v12Process).not.toHaveBeenCalled();
-    expect(sinkWrite).toHaveBeenCalledOnce();
-
-    const written = sinkWrite.mock.calls[0][0];
-    expect(written.content).toBe(
-      "SAA is the core settlement engine — 17 operation types, FIFO ordering via EC"
-    );
-    expect(written.category).toBe("architecture-decision");
-    expect(written.confidence).toBe(1.0);
-    expect(written.origin_source).toBe("user");
-
-    expect(logExtraction).toHaveBeenCalledOnce();
-    const log = logExtraction.mock.calls[0][0];
-    expect(log.skip_reason).toBeNull();
-    expect(log.confidence_avg).toBe(1.0);
+    expect(v12Process).toHaveBeenCalledOnce();
+    // 4th arg should be true
+    expect(v12Process.mock.calls[0][3]).toBe(true);
 
     const stats = (piece as any)._stats;
     expect(stats.turnsProcessed).toBe(1);
     expect(stats.memoriesWritten).toBe(1);
-    expect(stats.categoriesCount["architecture-decision"]).toBe(1);
   });
 
-  it("uses first 80 chars as title when title is omitted", async () => {
-    const { piece, sinkWrite } = makeEncoder();
-    const longContent = "A".repeat(120);
-    piece.enqueue(makeTurn({ force_store: { content: longContent } }));
-    await flush(piece);
-    const written = sinkWrite.mock.calls[0][0];
-    expect(written.title.length).toBe(80);
-    expect(written.category).toBe("preference"); // default
-  });
+  it("normal turn calls v12.encoder.process with skipTriage=false", async () => {
+    const { piece, v12Process } = makeEncoder();
 
-  it("uses provided title and category", async () => {
-    const { piece, sinkWrite } = makeEncoder();
-    piece.enqueue(
-      makeTurn({
-        force_store: {
-          title: "Custom Title",
-          content: "Some content",
-          category: "mental-model",
-        },
-      })
-    );
-    await flush(piece);
-    const written = sinkWrite.mock.calls[0][0];
-    expect(written.title).toBe("Custom Title");
-    expect(written.category).toBe("mental-model");
-  });
-
-  it("calls relatePiece.handleNewMemory when wired", async () => {
-    const handleNewMemory = vi.fn().mockResolvedValue(undefined);
-    const { piece, sinkWrite } = makeEncoder();
-    (piece as any).v12.relatePiece = { handleNewMemory };
-
-    piece.enqueue(makeTurn({ force_store: { content: "test memory" } }));
+    piece.enqueue(makeTurn());
     await flush(piece);
 
-    expect(handleNewMemory).toHaveBeenCalledOnce();
-    const call = handleNewMemory.mock.calls[0][0];
-    expect(call.id).toBe((await sinkWrite.mock.results[0].value).id);
-    expect(call.content).toBe("test memory");
+    expect(v12Process.mock.calls[0][3]).toBe(false);
   });
 });
 

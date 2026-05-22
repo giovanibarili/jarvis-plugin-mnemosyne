@@ -71,40 +71,53 @@ export class EncoderV12 {
   async process(
     turn: string,
     sessionId: string,
-    onStep?: (step: "triage" | "classify" | "relate") => void
+    onStep?: (step: "triage" | "classify" | "relate") => void,
+    skipTriage?: boolean
   ): Promise<EncoderV12Result> {
-    // Step 1: Triage
-    onStep?.("triage");
-    const triage = await this.triage.evaluate(turn);
-    const triageCost = triage.costUsd ?? 0;
+    let triageCost = 0;
 
-    if (!triage.worth_extracting) {
+    if (skipTriage) {
+      // Triage skipped by caller — content is already known to be worth extracting.
+      // Log a zero-cost triage entry so the extraction log stays consistent.
       await this.opts.logger?.logExtraction({
         turn_id: sessionId,
-        pass: 2,
-        pipeline_version: "1.2",
-        categories: [],
-        candidates_emitted: 0,
-        classify_candidates: 0,
-        new_categories_proposed: 0,
-        materialized: [],
-        intra_turn_edges: 0,
-        confidence_avg: 0,
-        cost_usd: triageCost,
-        skip_reason: triage.reason,
+        pass: 1,
+        skip_reason: "triage_skipped_by_caller",
+        cost_usd: 0,
       });
-      return {
-        skipped: true,
-        skipReason: triage.reason,
-        memories: [],
-        intraTurnEdges: [],
-        spend: { triage: triageCost, classify: 0, relate: 0, total: triageCost },
-      };
+    } else {
+      // Step 1: Triage
+      onStep?.("triage");
+      const triage = await this.triage.evaluate(turn);
+      triageCost = triage.costUsd ?? 0;
+
+      if (!triage.worth_extracting) {
+        await this.opts.logger?.logExtraction({
+          turn_id: sessionId,
+          pass: 2,
+          categories: [],
+          candidates_emitted: 0,
+          classify_candidates: 0,
+          new_categories_proposed: 0,
+          materialized: [],
+          intra_turn_edges: 0,
+          confidence_avg: 0,
+          cost_usd: triageCost,
+          skip_reason: triage.reason,
+        });
+        return {
+          skipped: true,
+          skipReason: triage.reason,
+          memories: [],
+          intraTurnEdges: [],
+          spend: { triage: triageCost, classify: 0, relate: 0, total: triageCost },
+        };
+      }
     }
 
     // Step 2: Classify
     onStep?.("classify");
-    const classified = await this.classify.run(turn, triage.reason);
+    const classified = await this.classify.run(turn, skipTriage ? "caller_forced" : "");
     const classifyCost = classified.costUsd ?? 0;
 
     // Step 2b: Gate each candidate

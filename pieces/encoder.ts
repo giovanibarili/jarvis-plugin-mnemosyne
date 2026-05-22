@@ -105,77 +105,7 @@ export class EncoderPiece implements Piece {
   private async processTurn(turn: TurnContext): Promise<void> {
     const turnId = `${turn.session_id}-${turn.timestamp}`;
 
-    // ── Force-store fast path ─────────────────────────────────────────────
-    // Bypasses triage/classify/gate. The caller has already decided this is
-    // worth remembering (e.g. mnemosyne_triage tool). confidence=1.0.
-    if (turn.force_store) {
-      const { force_store: fs } = turn;
-      const content = fs.content.trim();
-      const title = (fs.title?.trim() || content.slice(0, 80)).trim();
-      const category = fs.category?.trim() || "preference";
-      const now = new Date().toISOString();
-
-      const draft = {
-        id: `${turnId}-${Math.random().toString(36).slice(2, 8)}`,
-        session_id: turn.session_id,
-        category,
-        title,
-        content,
-        tags: [],
-        project: null,
-        confidence: 1.0,
-        reinforcements: 0,
-        visibility: "open" as const,
-        pinned: false,
-        created_at: Date.now(),
-        last_accessed: Date.now(),
-        source_session: turn.session_id,
-        promoted_at: null,
-        evidence: content,
-        origin_source: "user" as const,
-      };
-
-      const written = await (this.v12.encoder as any)["opts"].sink.write(draft);
-      this._stats.turnsProcessed++;
-      this._stats.memoriesWritten++;
-      this._stats.candidatesEmitted++;
-      this._stats.categoriesCount[category] =
-        (this._stats.categoriesCount[category] ?? 0) + 1;
-
-      await this.logger.logExtraction({
-        turn_id: turnId,
-        pass: 2,
-        categories: [category],
-        candidates_emitted: 1,
-        classify_candidates: 0,
-        new_categories_proposed: 0,
-        materialized: [category],
-        intra_turn_edges: 0,
-        confidence_avg: 1.0,
-        cost_usd: 0,
-        skip_reason: null,
-      });
-
-      if (this.v12.relatePiece) {
-        this.v12.relatePiece
-          .handleNewMemory({
-            id: written.id,
-            title,
-            content,
-            evidence: content,
-            origin: "user",
-            createdAt: now,
-            category,
-            siblingIds: [],
-          })
-          .catch((err: unknown) => {
-            console.error("[mnemosyne] force-store relate failed:", err);
-          });
-      }
-      return;
-    }
-
-    // ── Normal path: triage → classify → gate → store → relate ───────────
+    // ── Normal path: triage (optional) → classify → gate → store → relate ─
     const turnText = [
       turn.user_message ? `User: ${turn.user_message}` : "",
       turn.assistant_response ? `Assistant: ${turn.assistant_response}` : "",
@@ -183,9 +113,12 @@ export class EncoderPiece implements Piece {
       .filter(Boolean)
       .join("\n\n");
 
-    const result = await this.v12.encoder.process(turnText, turnId, (step) => {
-      this._activeStep = step;
-    });
+    const result = await this.v12.encoder.process(
+      turnText,
+      turnId,
+      (step) => { this._activeStep = step; },
+      turn.skip_triage === true
+    );
     this._activeStep = null;
     this._stats.turnsProcessed++;
 

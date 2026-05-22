@@ -13,12 +13,11 @@ export function buildMnemosyneTriageTool(encoder: EncoderPiece): CapabilityDefin
   return {
     name: "mnemosyne_triage",
     description:
-      "Force-encode a prompt directly into Mnemosyne long-term memory. " +
-      "Bypasses triage/classify/gate entirely — no LLM inference, no skip risk. " +
-      "Content is written with confidence=1.0 and immediately reinforced if a " +
-      "near-duplicate already exists. Use when you have already decided that " +
-      "something is worth remembering — insights, decisions, preferences, domain knowledge. " +
-      "Returns immediately; write runs async in the encoder queue.",
+      "Send a prompt through the Mnemosyne pipeline, skipping triage. " +
+      "Classify → gate → store → relate run normally, so categories, confidence, " +
+      "and graph edges are computed correctly. Use when you have already decided " +
+      "the content is worth extracting — triage would just say yes anyway. " +
+      "Returns immediately; pipeline runs async in the encoder queue.",
     input_schema: {
       type: "object",
       properties: {
@@ -62,19 +61,16 @@ export function buildMnemosyneTriageTool(encoder: EncoderPiece): CapabilityDefin
         assistant_response: assistantResponse,
         tool_calls: [],
         timestamp: Date.now(),
-        // Bypass triage/classify/gate — the caller has already decided this
-        // content is worth storing. Write directly with confidence=1.0.
-        force_store: {
-          content: prompt,
-          // Let the encoder derive the title from the first 80 chars
-        },
+        // Skip triage — the caller has already decided this content is worth
+        // extracting. Classify → gate → store → relate run normally.
+        skip_triage: true,
       };
 
       encoder.enqueue(turn);
 
       return {
         ok: true,
-        message: "Enqueued for direct write. Bypasses triage/classify/gate — will be stored with confidence=1.0.",
+        message: "Enqueued. Triage skipped — classify → gate → store → relate will run normally.",
         session_id: sessionId,
         preview: {
           user_message: prompt.slice(0, 120) + (prompt.length > 120 ? "…" : ""),

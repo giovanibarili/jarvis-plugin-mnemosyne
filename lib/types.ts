@@ -132,19 +132,12 @@ export interface TurnContext {
     assistant_response: string;
   }>;
   /**
-   * When set, bypasses triage/classify/gate entirely.
-   * The content is written directly to the store with confidence=1.0
-   * and reinforced if a near-duplicate already exists.
-   * Set by mnemosyne_triage tool for explicit force-encoding.
+   * When true, skips the triage LLM call entirely and goes straight to
+   * classify → gate → store → relate. The caller has already decided the
+   * content is worth extracting — triage would be redundant.
+   * Set by mnemosyne_triage tool.
    */
-  force_store?: {
-    /** Short title for the memory. Defaults to first 80 chars of content. */
-    title?: string;
-    /** The memory content to store verbatim. */
-    content: string;
-    /** Category override. Defaults to 'preference'. */
-    category?: string;
-  };
+  skip_triage?: boolean;
 }
 
 export interface ScoreBreakdown {
