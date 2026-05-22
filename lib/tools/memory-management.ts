@@ -197,8 +197,22 @@ export function buildMemoryDeleteTool(
   };
 }
 
+export interface RelatePieceHook {
+  handleNewMemory(opts: {
+    id: string;
+    title: string;
+    content: string;
+    evidence?: string;
+    origin: string;
+    createdAt: string;
+    category: string;
+    siblingIds: string[];
+  }): Promise<void>;
+}
+
 export function buildMemoryPromoteTool(
-  store: MnemosyneStore
+  store: MnemosyneStore,
+  relatePiece?: RelatePieceHook
 ): CapabilityDefinition {
   return {
     name: "memory_promote",
@@ -225,6 +239,19 @@ export function buildMemoryPromoteTool(
         return {
           error: `promote failed: ${e instanceof Error ? e.message : String(e)}`,
         };
+      }
+      // Trigger async relate so promoted memory gets graph edges
+      if (relatePiece) {
+        relatePiece.handleNewMemory({
+          id: mem.id,
+          title: mem.title,
+          content: mem.content,
+          evidence: mem.evidence,
+          origin: mem.origin_source ?? "user",
+          createdAt: new Date(mem.created_at).toISOString(),
+          category: mem.category,
+          siblingIds: [],
+        }).catch(() => {/* fire-and-forget */});
       }
       return { ok: true, id: mem.id };
     },

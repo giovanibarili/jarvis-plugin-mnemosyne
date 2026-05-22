@@ -416,13 +416,16 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   panel.setStatsSources(encoder, retriever);
 
   // 7b. Wire the pipeline (always — no feature flag)
-  await wireV12Pipeline({ encoder, store, chroma, neo4j, llm, logger, config });
+  // relatePieceRef is passed to registerTools so memory_promote can trigger
+  // relate after promotion. wireV12Pipeline populates relatePieceRef.current.
+  const relatePieceRef: { current?: RelatePiece } = {};
+  await wireV12Pipeline({ encoder, store, chroma, neo4j, llm, logger, config, relatePieceRef });
 
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
 
   // 9. Tool registration (Task 13)
-  registerTools(ctx, store, neo4j, consolidator, replayEngine, encoder, config.retriever.rerank_weights, config);
+  registerTools(ctx, store, neo4j, consolidator, replayEngine, encoder, config.retriever.rerank_weights, config, relatePieceRef);
 
   // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
   // The renderer fetches POST /plugins/jarvis-plugin-mnemosyne/{forget,pin,consolidate}.
@@ -820,7 +823,8 @@ function registerTools(
   replay: ReplayEngine,
   encoder: EncoderPiece,
   rerankWeights: RerankWeights,
-  config: any
+  config: any,
+  relatePieceRef?: { current?: import("./relate.js").RelatePiece }
 ): void {
   const reg = ctx.capabilityRegistry;
 
@@ -835,7 +839,7 @@ function registerTools(
   reg.register(buildMemoryPinTool(store));
   reg.register(buildMemoryUnpinTool(store));
   reg.register(buildMemoryDeleteTool(store));
-  reg.register(buildMemoryPromoteTool(store));
+  reg.register(buildMemoryPromoteTool(store, relatePieceRef?.current));
 
   // Workflows
   reg.register(buildWorkflowListTool(neo4j));
@@ -874,6 +878,7 @@ interface V12WireOpts {
   llm: LLMClient;
   logger: Logger;
   config: any;
+  relatePieceRef?: { current?: RelatePiece };
 }
 
 /**
@@ -891,7 +896,7 @@ interface V12WireOpts {
  *   - encoder.setV12Hook       ← swaps EncoderPiece's processing path
  */
 async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
-  const { encoder, store, chroma, neo4j, llm, logger, config } = opts;
+  const { encoder, store, chroma, neo4j, llm, logger, config, relatePieceRef } = opts;
 
   // Resolve filesystem paths. Defaults mirror config.default.json but allow
   // override via config + tilde-expansion. We expand ~/  only — anything more
@@ -1023,4 +1028,7 @@ async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
   }
 
   encoder.setV12Hook({ encoder: encoderV12, relatePiece });
+  if (relatePieceRef && relatePiece) {
+    relatePieceRef.current = relatePiece;
+  }
 }
