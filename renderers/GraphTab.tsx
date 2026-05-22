@@ -212,7 +212,7 @@ const DEFAULT_FILTERS: Filters = {
 /**
  * Build the Cypher query from the active filter set. The query always
  * includes one OPTIONAL MATCH for relationships so isolated nodes are
- * still rendered. Nodes are capped at 200 (WITH n LIMIT) to keep the query fast without the LIMIT-on-rows bug.
+ * still rendered. No node limit — all matching memories are returned.
  */
 function buildCypher(filters: Filters): string {
   const clauses: string[] = [];
@@ -223,7 +223,6 @@ function buildCypher(filters: Filters): string {
     return `
       MATCH (n)
       WHERE n:Workflow OR n:Step
-      WITH n LIMIT 200
       OPTIONAL MATCH (n)-[r:NEXT|ON_FAILURE|HAS_STEP]-(m)
       RETURN n, r, m
     `.trim();
@@ -260,7 +259,6 @@ function buildCypher(filters: Filters): string {
   return `
     MATCH (n:Memory)
     ${whereClause}
-    WITH n LIMIT 200
     OPTIONAL MATCH (n)-[r]-(m)
     WHERE m IS NULL OR m:Memory OR m:Workflow OR m:Step
     RETURN n, r, m
