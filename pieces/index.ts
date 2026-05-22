@@ -997,8 +997,19 @@ async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
       // layer (newly-written memories live there until consolidation
       // promotes them). We map QueryHit → RelatePayload+id.
       chromaQuery: async (m, topK, _threshold) => {
-        const hits = await chroma.query("short", m.content, topK);
-        return hits.map((h) => ({
+        // Query both layers — memories may live in "short" (new) or "long"
+        // (promoted). Dedup by id, keeping the first occurrence.
+        const [shortHits, longHits] = await Promise.all([
+          chroma.query("short", m.content, topK),
+          chroma.query("long", m.content, topK),
+        ]);
+        const seen = new Set<string>();
+        const allHits = [...shortHits, ...longHits].filter((h) => {
+          if (seen.has(h.id)) return false;
+          seen.add(h.id);
+          return true;
+        }).slice(0, topK);
+        return allHits.map((h) => ({
           id: h.id,
           title: (h.metadata?.title as string) ?? "",
           content: h.content,
