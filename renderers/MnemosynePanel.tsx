@@ -108,7 +108,9 @@ export default function MnemosynePanel({ state }: Props) {
     return () => clearTimeout(t);
   }, [search]);
 
-  // Backend search if available, else local filter
+  // Shared semantic search endpoint: vector seeds + 1-hop neighbors (same
+  // pipeline as retriever injection). List tab shows ranked seed hits;
+  // Graph tab uses both seeds + neighborIds to highlight the subgraph.
   useEffect(() => {
     let cancelled = false;
     if (!debouncedSearch) {
@@ -123,9 +125,11 @@ export default function MnemosynePanel({ state }: Props) {
       );
       if (cancelled) return;
       if (result && Array.isArray(result.memories)) {
+        // List shows seed memories ranked by vector similarity.
+        // neighborIds (1-hop graph expansion) are used by Graph tab only.
         setSearchHits(result.memories as Memory[]);
       } else {
-        // Backend route may not be wired — fall back to client-side text match
+        // Fallback to client-side text match if backend unavailable
         setSearchHits(null);
       }
       setSearching(false);

@@ -324,7 +324,8 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
     return () => clearTimeout(t);
   }, [search]);
 
-  // Semantic search → update searchIds filter
+  // Semantic search → update searchIds filter (seeds + 1-hop neighbors,
+  // identical to what the retriever injects into the system prompt)
   useEffect(() => {
     if (!debouncedSearch) {
       setFilters((p) => ({ ...p, searchIds: null }));
@@ -334,8 +335,10 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
     fetch(`${PLUGIN_BASE}/search?q=${encodeURIComponent(debouncedSearch)}`)
       .then((r) => r.json())
       .then((result: any) => {
-        const ids = (result.memories ?? []).map((m: any) => m.id).filter(Boolean);
-        setFilters((p) => ({ ...p, searchIds: ids.length > 0 ? ids : ["__no_match__"] }));
+        const seedIds = (result.memories ?? []).map((m: any) => m.id).filter(Boolean);
+        const neighborIds = (result.neighborIds ?? []).filter(Boolean);
+        const allIds = [...new Set([...seedIds, ...neighborIds])];
+        setFilters((p) => ({ ...p, searchIds: allIds.length > 0 ? allIds : ["__no_match__"] }));
       })
       .catch(() => setFilters((p) => ({ ...p, searchIds: null })))
       .finally(() => setSearching(false));

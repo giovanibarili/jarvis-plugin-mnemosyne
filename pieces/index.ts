@@ -582,7 +582,64 @@ function registerHttpRoutes(
     }
   });
 
-  ctx.registerRoute("POST", `${base}/rebuild-indexes`, (_req: any, res: any) => {
+  /**
+   * GET /search?q=<query>[&k=<topK>]
+   *
+   * Unified semantic search endpoint used by both List and Graph tabs.
+   * Pipeline mirrors the retriever: vector top-K seeds → 1-hop graph
+   * expansion → returns all matching memory IDs + neighbor IDs.
+   *
+   * Response: { memories: Memory[], neighborIds: string[] }
+   *   - memories: reranked vector hits (seed nodes)
+   *   - neighborIds: 1-hop graph neighbors not in seeds
+   *
+   * Both tabs show seeds + neighbors, identical to what gets injected
+   * into the system prompt.
+   */
+  ctx.registerRoute("GET", `${base}/search`, async (req: any, res: any) => {
+    try {
+      const url = new URL(req.url, "http://localhost");
+      const q = url.searchParams.get("q") ?? "";
+      const k = Math.min(parseInt(url.searchParams.get("k") ?? "20", 10), 50);
+      if (!q.trim()) return jsonResponse(res, 200, { memories: [], neighborIds: [] });
+
+      // 1. Vector search — short + long layers
+      const [shortHits, longHits] = await Promise.all([
+        store.chroma.query("short", q, k),
+        store.chroma.query("long", q, k),
+      ]);
+      const allHits = [...shortHits, ...longHits];
+
+      // 2. Hydrate + dedup
+      const seen = new Set<string>();
+      const memories: any[] = [];
+      for (const hit of allHits) {
+        if (seen.has(hit.id)) continue;
+        seen.add(hit.id);
+        const mem = await store.markdownStore.read(hit.id).catch(() => null);
+        if (!mem) continue;
+        memories.push({ ...mem, _vectorSim: 1 - hit.distance });
+      }
+
+      // 3. 1-hop graph expansion
+      const seedIds = memories.map((m) => m.id);
+      let neighborIds: string[] = [];
+      if (seedIds.length > 0) {
+        const neighbors = await store.neo4j.oneHopNeighbors(seedIds).catch(() => []);
+        neighborIds = neighbors
+          .filter((n: any) => !seen.has(n.id))
+          .map((n: any) => n.id);
+        // Add neighbor IDs to seen (don't push full objects — caller gets IDs)
+        neighborIds.forEach((id: string) => seen.add(id));
+      }
+
+      jsonResponse(res, 200, { memories, neighborIds });
+    } catch (e) {
+      jsonResponse(res, 500, { ok: false, error: String(e) });
+    }
+  });
+
+    ctx.registerRoute("POST", `${base}/rebuild-indexes`, (_req: any, res: any) => {
     // Index rebuild is a long-running script (scripts/rebuild-indexes.ts).
     // Surfacing it through the HUD requires a job-runner we don't have yet,
     // so we return a clear 501 instead of pretending to start the work.
