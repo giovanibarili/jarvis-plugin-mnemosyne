@@ -60,6 +60,8 @@ for (const k of ["NEOVIS_ADVANCED_CONFIG", "NEOVIS_DEFAULT_CONFIG"]) {
 }
 import type { Memory, FilterCategory, Category } from "./types";
 
+const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
+
 interface Props {
   memories: Memory[];
   selectedId: string | null;
@@ -198,6 +200,8 @@ interface Filters {
   onlyConflicts: boolean;
   onlyWorkflows: boolean;
   onlyLongTerm: boolean;
+  /** When non-null, restrict graph to these memory IDs (from search). */
+  searchIds: string[] | null;
 }
 
 const DEFAULT_FILTERS: Filters = {
@@ -207,6 +211,7 @@ const DEFAULT_FILTERS: Filters = {
   onlyConflicts: false,
   onlyWorkflows: false,
   onlyLongTerm: false,
+  searchIds: null,
 };
 
 /**
@@ -253,6 +258,10 @@ function buildCypher(filters: Filters): string {
   if (filters.onlyConflicts) {
     clauses.push(`EXISTS { MATCH (n)-[:CONTRADICTS]-() }`);
   }
+  if (filters.searchIds !== null && filters.searchIds.length > 0) {
+    const idList = filters.searchIds.map((id) => `'${id.replace(/'/g, "\\'")}'`).join(", ");
+    clauses.push(`n.id IN [${idList}]`);
+  }
 
   const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
 
@@ -292,6 +301,10 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
   // Bumped on Refresh / Reset to force the (re)render effect to re-run
   // even when the filter object is reference-equal.
   const [renderTick, setRenderTick] = useState(0);
+  // Search box
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [searching, setSearching] = useState(false);
   // Dynamic category list — fetched from Neo4j on mount and Refresh.
   const [allCategories, setAllCategories] = useState<string[]>(ALL_CATEGORIES_STATIC);
 
@@ -304,6 +317,29 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
   useEffect(() => {
     if (renderTick > 0) fetchAllCategories().then(setAllCategories);
   }, [renderTick]);
+
+  // Debounce search input → 300ms
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Semantic search → update searchIds filter
+  useEffect(() => {
+    if (!debouncedSearch) {
+      setFilters((p) => ({ ...p, searchIds: null }));
+      return;
+    }
+    setSearching(true);
+    fetch(`${PLUGIN_BASE}/search?q=${encodeURIComponent(debouncedSearch)}`)
+      .then((r) => r.json())
+      .then((result: any) => {
+        const ids = (result.memories ?? []).map((m: any) => m.id).filter(Boolean);
+        setFilters((p) => ({ ...p, searchIds: ids.length > 0 ? ids : ["__no_match__"] }));
+      })
+      .catch(() => setFilters((p) => ({ ...p, searchIds: null })))
+      .finally(() => setSearching(false));
+  }, [debouncedSearch]);
 
   // Initialize / re-initialize neovis whenever filters or renderTick change.
   useEffect(() => {
@@ -650,7 +686,27 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
   return (
     <div style={styles.wrap}>
       <div style={styles.controls}>
+        {/* Search box */}
         <div style={styles.controlsRow}>
+          <input
+            type="text"
+            placeholder="🔍 search memories…"
+            value={search}
+            onChange={(e: any) => setSearch(e.target.value)}
+            style={styles.searchInput}
+          />
+          {searching && <span style={{ fontSize: "11px", color: "#888" }}>searching…</span>}
+          {search && !searching && (
+            <button
+              style={{ ...styles.actionBtnGhost, padding: "2px 8px", fontSize: "11px" }}
+              onClick={() => { setSearch(""); setDebouncedSearch(""); setFilters((p) => ({ ...p, searchIds: null })); }}
+            >
+              ✕ clear
+            </button>
+          )}
+        </div>
+
+                <div style={styles.controlsRow}>
           <span style={styles.label}>window</span>
           {(Object.keys(TIME_WINDOW_MS) as TimeWindow[]).map((tw) => (
             <button
@@ -894,6 +950,17 @@ const styles: Record<string, any> = {
     fontSize: "11px",
     fontFamily: "inherit",
     outline: "none",
+  },
+  searchInput: {
+    padding: "4px 10px",
+    borderRadius: "12px",
+    border: "1px solid #2a2a2a",
+    backgroundColor: "#161616",
+    color: "#e0e0e0",
+    fontSize: "12px",
+    fontFamily: "inherit",
+    outline: "none",
+    width: "220px",
   },
   toggle: {
     display: "inline-flex",
