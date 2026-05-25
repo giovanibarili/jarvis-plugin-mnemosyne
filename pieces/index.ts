@@ -10,6 +10,7 @@ import { ChromaServer } from "../lib/chroma-server.js";
 import { ChromaAdapter } from "../lib/chroma-adapter.js";
 import { Neo4jServer } from "../lib/neo4j-server.js";
 import { Neo4jAdapter } from "../lib/neo4j-adapter.js";
+import { detectNeo4jStatus, type Neo4jStatus } from "../lib/neo4j-status.js";
 import { MarkdownStore } from "../lib/markdown-store.js";
 import { MnemosyneStore } from "../lib/store.js";
 import { Logger } from "../lib/logger.js";
@@ -52,6 +53,7 @@ import {
   buildMnemosyneConsolidateTool,
   buildMnemosyneStatsTool,
 } from "../lib/tools/admin-tools.js";
+import { buildMnemosyneStatusTool } from "../lib/tools/status-tool.js";
 import { buildMemoryFetchTool } from "../lib/tools/memory-fetch.js";
 import { buildMnemosyneTriageTool } from "../lib/tools/triage-tool.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
@@ -291,6 +293,32 @@ ${block}
   ];
 }
 
+/* ---- helpers needed by bootstrapAsync (must be defined before the call) ---- */
+
+/**
+ * Notify the main JARVIS session that the Neo4j/graph layer is degraded.
+ */
+function notifyDegraded(ctx: PluginContext, status: { code: string; userMessage?: string; remediation?: string; detail?: string }): void {
+  const lines = [
+    `[SYSTEM] **Mnemosyne — graph layer degraded** (${status.code})`,
+    status.userMessage ?? "Neo4j não está disponível.",
+    status.remediation ? `\n💡 ${status.remediation}` : "",
+    status.detail ? `\nDetalhe: ${status.detail}` : "",
+    "\nO plugin continua funcional com Chroma + Markdown (sem grafo).",
+  ].filter(Boolean).join("\n");
+  ctx.bus.publish({ channel: "ai.request", source: "mnemosyne", target: "main", text: lines } as any);
+}
+
+/** Module-level Neo4j status cache — read by mnemosyne_status tool. */
+const _neo4jState = { lastNeo4jStatus: null as import("../lib/neo4j-status.js").Neo4jStatus | null, graphDegraded: false };
+
+function setLastNeo4jStatus(status: import("../lib/neo4j-status.js").Neo4jStatus, graphDegraded: boolean): void {
+  _neo4jState.lastNeo4jStatus = status;
+  _neo4jState.graphDegraded = graphDegraded;
+}
+
+/* --------------------------------------------------------------------------- */
+
 /** Bootstrap result: every long-lived component built during async init. */
 interface Bootstrap {
   observer: ObserverPiece;
@@ -338,21 +366,26 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   });
   await chromaServer.start();
 
-  // 4. Start Neo4j container, validate loopback binding (D10)
-  const neo4jServer = new Neo4jServer({
-    composeFile: join(__dirname, "../docker/docker-compose.yml"),
-    containerName: config.neo4j.container_name,
-    boltUri: config.neo4j.bolt_uri,
-  });
-  await neo4jServer.start();
-
-  if (!(await neo4jServer.validateLoopbackBinding())) {
-    throw new Error(
-      "Neo4j ports not bound to 127.0.0.1 — refusing to start (security)"
-    );
+  // 4. Neo4j — OPTIONAL fail-soft path.
+  //
+  // The plugin must never block JARVIS boot on the graph layer being
+  // available. Three things can go wrong before we even attempt to
+  // connect: (a) Docker daemon is down, (b) the mnemosyne-neo4j container
+  // doesn't exist yet, (c) the container exists but isn't running.
+  //
+  // detectNeo4jStatus() probes all three states and, when the container is
+  // merely stopped, tries `docker start mnemosyne-neo4j` once. Anything
+  // else degrades the plugin: Chroma+Markdown stay functional, workflow
+  // tools disable, retriever falls back to vector-only.
+  const status = await detectNeo4jStatus({ autoStartStopped: true });
+  if (status.code !== "ok") {
+    notifyDegraded(ctx, status);
   }
 
-  // 5. Connect adapters
+  // 5. Connect adapters. Chroma is mandatory — we need a vector store for
+  // any useful retrieval. Neo4j is best-effort: if the probe was ok, try
+  // to connect with a tight timeout; if it fails (or the probe already
+  // said degraded), keep going with `graphDegraded = true`.
   const chroma = new ChromaAdapter({
     host: config.chroma.host,
     port: config.chroma.port,
@@ -361,12 +394,32 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   await chroma.init();
 
   const neo4j = new Neo4jAdapter({ uri: config.neo4j.bolt_uri });
-  await neo4j.connect();
-  await neo4j.applySchema(join(__dirname, "../cypher/schema.cypher"));
+  let graphDegraded = status.code !== "ok";
+  if (!graphDegraded) {
+    try {
+      await neo4j.connect(2000);
+      await neo4j.applySchema(join(__dirname, "../cypher/schema.cypher"));
+    } catch (e) {
+      console.error("[mnemosyne] Neo4j connect failed after ok probe — degrading:", e);
+      graphDegraded = true;
+      // Synthesize a status so the user still gets a notification when the
+      // probe passed but Bolt itself is unhappy (e.g. mid-startup, auth changed).
+      notifyDegraded(ctx, {
+        code: "unknown-error",
+        userMessage:
+          "Mnemosyne: Neo4j respondeu ao Docker mas a conexão Bolt falhou — grafo desativado.",
+        remediation:
+          "Verifique `docker logs mnemosyne-neo4j` e rode `jarvis_reset` quando o Neo4j estiver pronto.",
+        detail: String((e as Error)?.message ?? e),
+      });
+    }
+  }
 
   const markdownStore = new MarkdownStore(DATA_DIR);
   const logger = new Logger(DATA_DIR);
   const store = new MnemosyneStore(markdownStore, chroma, neo4j, logger);
+  store.setGraphDegraded(graphDegraded);
+  setLastNeo4jStatus(status, graphDegraded);
 
   // 6. Build pipelines
   const llm = makeLLMClient(ctx);
@@ -424,8 +477,21 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
 
-  // 9. Tool registration (Task 13)
-  registerTools(ctx, store, neo4j, consolidator, replayEngine, encoder, config.retriever.rerank_weights, config, relatePieceRef);
+  // 9. Tool registration (Task 13). When the graph is degraded, workflow_*
+  // tools are skipped (they're pure Neo4j) and mnemosyne_status always
+  // reflects the live state.
+  registerTools(
+    ctx,
+    store,
+    neo4j,
+    consolidator,
+    replayEngine,
+    encoder,
+    config.retriever.rerank_weights,
+    config,
+    relatePieceRef,
+    { graphDegraded },
+  );
 
   // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
   // The renderer fetches POST /plugins/jarvis-plugin-mnemosyne/{forget,pin,consolidate}.
@@ -666,7 +732,14 @@ function gatedPiece<P extends Piece>(
     id,
     name,
     async start(bus) {
-      const b = await bootstrap;
+      let b: Bootstrap;
+      try {
+        b = await bootstrap;
+      } catch (err) {
+        // Bootstrap failed (e.g. Docker not running). Degrade silently —
+        // PieceManager will catch this and notify the user via ai.request.
+        throw err;
+      }
       real = pick(b);
       await real.start(bus);
     },
@@ -707,7 +780,12 @@ function gatedRetrieverPiece(
     id: "mnemosyne-retriever",
     name: "Mnemosyne Retriever",
     async start(bus) {
-      const b = await bootstrap;
+      let b: Bootstrap;
+      try {
+        b = await bootstrap;
+      } catch (err) {
+        throw err; // propagate — PieceManager isolates and notifies
+      }
       handle.real = b.retriever;
       await b.retriever.start(bus);
     },
@@ -881,29 +959,37 @@ function registerTools(
   encoder: EncoderPiece,
   rerankWeights: RerankWeights,
   config: any,
-  relatePieceRef?: { current?: import("./relate.js").RelatePiece }
+  relatePieceRef?: { current?: import("./relate.js").RelatePiece },
+  state: { graphDegraded: boolean } = { graphDegraded: false },
 ): void {
   const reg = ctx.capabilityRegistry;
 
-  // Memory — search & inspection
+  // Memory — search & inspection (vector-backed, work without graph)
   reg.register(buildMemorySearchTool(store));
   reg.register(buildMemoryGetTool(store));
   reg.register(buildMemoryListTool(store));
   reg.register(buildMemoryExplainTool(store, rerankWeights));
 
-  // Memory — management
+  // Memory — management (markdown + chroma; graph writes inside store are
+  // already guarded by store.graphDegraded)
   reg.register(buildMemoryUpdateTool(store));
   reg.register(buildMemoryPinTool(store));
   reg.register(buildMemoryUnpinTool(store));
   reg.register(buildMemoryDeleteTool(store));
   reg.register(buildMemoryPromoteTool(store, relatePieceRef?.current));
 
-  // Workflows
-  reg.register(buildWorkflowListTool(neo4j));
-  reg.register(buildWorkflowGetTool(neo4j));
-  reg.register(buildWorkflowReplayTool(neo4j, replay));
+  // Workflows — pure Neo4j. Skip entirely when graph is degraded; the
+  // tools would just throw Neo4jNotReadyError on every call otherwise.
+  if (!state.graphDegraded) {
+    reg.register(buildWorkflowListTool(neo4j));
+    reg.register(buildWorkflowGetTool(neo4j));
+    reg.register(buildWorkflowReplayTool(neo4j, replay));
+  } else {
+    console.warn("[mnemosyne] graph degraded — skipping workflow_* tools");
+  }
 
-  // Admin
+  // Admin — status tool always registered so the user can introspect.
+  reg.register(buildMnemosyneStatusTool(store, _neo4jState));
   reg.register(buildMnemosyneConsolidateTool(consolidator));
   reg.register(buildMnemosyneStatsTool(store));
   reg.register(buildMnemosyneTriageTool(encoder));
