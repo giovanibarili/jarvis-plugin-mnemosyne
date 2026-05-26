@@ -650,28 +650,24 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
       setError(String(evt?.error?.message ?? evt?.error ?? "unknown error"));
     });
     viz.registerOnEvent(NeoVisEvents.ClickNodeEvent, (evt: any) => {
-      // NeoVis exposes node data in multiple shapes depending on version/config.
-      // We try every known location to extract the memory's string UUID.
+      // NeoVis can return node data in several shapes; extract the Neo4j
+      // property "id" (our UUID string) robustly regardless of shape.
       const raw = evt?.node?.raw;
-      const props =
-        raw?.properties ??           // neovis.js v2 shape
-        evt?.node?.properties ??     // fallback
-        {};
+      const props = raw?.properties ?? evt?.node?.properties ?? {};
 
-      // props.id is the Memory UUID stored in Neo4j; prefer it over the
-      // internal vis-network numeric id (evt.node.id) which is NOT the UUID.
-      const id =
-        (typeof props.id === "string" && props.id) ||
-        // Some neovis versions store properties under raw.properties as Integer objects
-        (raw?.properties?.id?.low !== undefined ? null : null) ||
-        null;
+      // Helper: coerce any value to string (handles Neo4j Integer objects too)
+      const str = (v: any): string | null => {
+        if (v == null) return null;
+        if (typeof v === "string") return v || null;
+        if (typeof v === "number") return String(v) || null;
+        // Neo4j driver Integer object: { low, high }
+        if (typeof v === "object" && "low" in v) return String(v.low) || null;
+        return String(v) || null;
+      };
 
-      console.debug("[GraphTab] ClickNodeEvent", {
-        visId: evt?.node?.id,
-        propsId: props.id,
-        props,
-        resolved: id,
-      });
+      const id = str(props.id) ?? str(props.uuid) ?? str(props.name) ?? null;
+
+      console.debug("[GraphTab] ClickNodeEvent", { visId: evt?.node?.id, props, resolved: id });
 
       if (id) onSelect(id);
     });
