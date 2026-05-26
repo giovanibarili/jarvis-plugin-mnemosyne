@@ -171,15 +171,26 @@ export default function MnemosynePanel({ state }: Props) {
   const selected = useMemo(
     () => {
       if (!selectedId) return null;
-      return memories.find((m) => m.id === selectedId) ?? fetchedMemory ?? null;
+      const inList = memories.find((m) => m.id === selectedId);
+      if (inList) return inList;
+      // Use fetchedMemory only when it matches the current selection
+      if (fetchedMemory && fetchedMemory.id === selectedId) return fetchedMemory;
+      return null;
     },
     [selectedId, memories, fetchedMemory],
   );
 
-  // When selectedId changes and isn't in the preloaded list, fetch from backend
+  // When selectedId changes and isn't in the preloaded list, fetch from backend.
+  // We do NOT clear fetchedMemory immediately to avoid the flicker where selected
+  // becomes null between the click and the fetch completing.
   useEffect(() => {
     if (!selectedId) { setFetchedMemory(null); return; }
-    if (memories.find((m) => m.id === selectedId)) { setFetchedMemory(null); return; }
+    if (memories.find((m) => m.id === selectedId)) {
+      // In the preloaded list — clear any stale fetched memory
+      setFetchedMemory(null);
+      return;
+    }
+    // Not in list — fetch without clearing first (avoids flicker)
     getJson(`${PLUGIN_BASE}/memory?id=${encodeURIComponent(selectedId)}`)
       .then((r: any) => r?.memory ? setFetchedMemory(r.memory as Memory) : setFetchedMemory(null))
       .catch(() => setFetchedMemory(null));

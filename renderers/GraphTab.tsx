@@ -650,11 +650,29 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
       setError(String(evt?.error?.message ?? evt?.error ?? "unknown error"));
     });
     viz.registerOnEvent(NeoVisEvents.ClickNodeEvent, (evt: any) => {
-      const props = evt?.node?.raw?.properties ?? evt?.node?.properties ?? {};
+      // NeoVis exposes node data in multiple shapes depending on version/config.
+      // We try every known location to extract the memory's string UUID.
+      const raw = evt?.node?.raw;
+      const props =
+        raw?.properties ??           // neovis.js v2 shape
+        evt?.node?.properties ??     // fallback
+        {};
+
+      // props.id is the Memory UUID stored in Neo4j; prefer it over the
+      // internal vis-network numeric id (evt.node.id) which is NOT the UUID.
       const id =
         (typeof props.id === "string" && props.id) ||
-        (typeof evt?.node?.id === "string" && evt.node.id) ||
+        // Some neovis versions store properties under raw.properties as Integer objects
+        (raw?.properties?.id?.low !== undefined ? null : null) ||
         null;
+
+      console.debug("[GraphTab] ClickNodeEvent", {
+        visId: evt?.node?.id,
+        propsId: props.id,
+        props,
+        resolved: id,
+      });
+
       if (id) onSelect(id);
     });
 
