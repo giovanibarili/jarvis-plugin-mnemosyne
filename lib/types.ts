@@ -247,6 +247,10 @@ export interface RelatedMemoryRef {
   relation: RelateRelation;
   direction: "incoming" | "outgoing";
   childCount: number;
+  /** LLM-generated explanation of why this relation exists. */
+  reason?: string;
+  /** Snippet of evidence from the source memory that justifies the relation. */
+  evidence?: string;
 }
 
 export interface MemoryNeighborhood {

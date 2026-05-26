@@ -60,8 +60,8 @@ export class SemanticRelationLinker {
    */
   async linkRelations(
     memory: Memory
-  ): Promise<Array<{ targetId: string; relation: RelationVerdict }>> {
-    const linked: Array<{ targetId: string; relation: RelationVerdict }> = [];
+  ): Promise<Array<{ targetId: string; relation: RelationVerdict; reason?: string }>> {
+    const linked: Array<{ targetId: string; relation: RelationVerdict; reason?: string }> = [];
 
     // Query both layers — new memory may be short-term, but we want to link
     // to existing long-term knowledge too.
@@ -84,22 +84,23 @@ export class SemanticRelationLinker {
       const candMem = await this.neo4j.getMemory(cand.id);
       if (!candMem) continue;
 
-      const verdict = await this.judge(memory, candMem);
+      const { verdict, reason } = await this.judge(memory, candMem);
       if (verdict === "unrelated") continue;
 
       await this.neo4j.createRelatesToEdge(
         memory.id,
         candMem.id,
         verdict,
-        1 - cand.distance
+        1 - cand.distance,
+        reason
       );
-      linked.push({ targetId: candMem.id, relation: verdict });
+      linked.push({ targetId: candMem.id, relation: verdict, reason });
     }
 
     return linked;
   }
 
-  private async judge(a: Memory, b: Memory): Promise<RelationVerdict> {
+  private async judge(a: Memory, b: Memory): Promise<{ verdict: RelationVerdict; reason?: string }> {
     const prompt = (await this.loadPrompt())
       .replace("{{A}}", `[${a.category}] ${a.title}: ${a.content}`)
       .replace("{{B}}", `[${b.category}] ${b.title}: ${b.content}`);
@@ -116,10 +117,10 @@ export class SemanticRelationLinker {
         .replace(/\n?```$/, "")
         .trim();
       const parsed = JSON.parse(cleaned);
-      return parsed.relation as RelationVerdict;
+      return { verdict: parsed.relation as RelationVerdict, reason: parsed.reason };
     } catch {
       // If LLM output is malformed, treat as unrelated — safe default
-      return "unrelated";
+      return { verdict: "unrelated" };
     }
   }
 }

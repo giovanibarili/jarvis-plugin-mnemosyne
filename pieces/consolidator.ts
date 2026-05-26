@@ -257,12 +257,16 @@ export class ConsolidatorPiece implements Piece {
       const dupIsOlder =
         dupMem.created_at < mem.created_at ||
         (dupMem.created_at === mem.created_at && dupMem.id < mem.id);
+      // incrementReinforcements is graph-only. Under degradation it's a no-op
+      // — the dedup still happens (markdown + chroma stay consistent); only
+      // the counter bump on the surviving memory is lost. Acceptable: the
+      // graph is rebuildable from markdown.
       if (dupIsOlder) {
-        await this.store.neo4j.incrementReinforcements(dupMem.id);
+        await this.store.incrementReinforcements(dupMem.id);
         await this.store.delete(mem.id);
         deleted.add(mem.id);
       } else {
-        await this.store.neo4j.incrementReinforcements(mem.id);
+        await this.store.incrementReinforcements(mem.id);
         await this.store.delete(dupMem.id);
         deleted.add(dupMem.id);
       }
@@ -272,15 +276,30 @@ export class ConsolidatorPiece implements Piece {
   }
 
   private async promote(): Promise<string[]> {
+    // Promotion criteria live in Neo4j (reinforcements counter). When the
+    // graph is degraded, fall back to markdown-only confidence threshold —
+    // we can still promote high-confidence memories without the graph.
     const short = await this.store.markdownStore.list({ layer: "short" });
     const ids: string[] = [];
+    const degraded = this.store.isGraphDegraded();
     for (const mem of short) {
-      const fresh = await this.store.neo4j.getMemory(mem.id);
-      if (!fresh) continue;
+      let reinforcements = mem.reinforcements;
+      let confidence = mem.confidence;
+      if (!degraded) {
+        try {
+          const fresh = await this.store.neo4j.getMemory(mem.id);
+          if (fresh) {
+            reinforcements = fresh.reinforcements;
+            confidence = fresh.confidence;
+          }
+        } catch {
+          // Single-memory hiccup — fall through to markdown values.
+        }
+      }
       const reinforcedEnough =
-        fresh.reinforcements >= this.config.promotionReinforcementsThreshold;
+        reinforcements >= this.config.promotionReinforcementsThreshold;
       const confidentEnough =
-        fresh.confidence >= this.config.promotionConfidenceThreshold;
+        confidence >= this.config.promotionConfidenceThreshold;
       if (reinforcedEnough || confidentEnough) {
         await this.store.promote(mem.id);
         ids.push(mem.id);
@@ -290,12 +309,19 @@ export class ConsolidatorPiece implements Piece {
   }
 
   private async detectConflicts(promotedIds: string[]): Promise<number> {
+    // Conflict detection writes CONTRADICTS edges to the graph. No graph,
+    // no conflict pass — skip entirely.
+    if (this.store.isGraphDegraded()) return 0;
     let count = 0;
     for (const id of promotedIds) {
-      const mem = await this.store.neo4j.getMemory(id);
-      if (!mem) continue;
-      const result = await this.conflictDetector.detectAndPersist(mem);
-      count += result.contradicts.length;
+      try {
+        const mem = await this.store.neo4j.getMemory(id);
+        if (!mem) continue;
+        const result = await this.conflictDetector.detectAndPersist(mem);
+        count += result.contradicts.length;
+      } catch {
+        // Per-memory hiccup — skip just this one.
+      }
     }
     return count;
   }

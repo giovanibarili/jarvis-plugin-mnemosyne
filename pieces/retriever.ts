@@ -20,10 +20,12 @@ export function formatNeighborhood(n: MemoryNeighborhood): string {
   if (!n || (n.parents.length === 0 && n.children.length === 0)) return "";
   const lines: string[] = [];
   for (const p of n.parents) {
-    lines.push(`  ↑ ${p.id} [${p.category}] "${p.title}" — ${p.relation}  (${p.childCount} filhos)`);
+    const why = p.reason ? `  // ${p.reason}` : "";
+    lines.push(`  ↑ ${p.id} [${p.category}] "${p.title}" — ${p.relation}  (${p.childCount} filhos)${why}`);
   }
   for (const c of n.children) {
-    lines.push(`  ↓ ${c.id} [${c.category}] "${c.title}" — ${c.relation}  (${c.childCount} filhos)`);
+    const why = c.reason ? `  // ${c.reason}` : "";
+    lines.push(`  ↓ ${c.id} [${c.category}] "${c.title}" — ${c.relation}  (${c.childCount} filhos)${why}`);
   }
   return lines.join("\n");
 }
@@ -394,27 +396,42 @@ export class RetrieverPiece {
     //    relation to a seed, not by direct semantic match. We still compute
     //    the snippet though: even a graph-pulled memory may have lexical
     //    overlap that explains why it's contextually relevant.
+    // 3. Graph 1-hop expansion — best-effort. When the graph layer is
+    //    degraded (Neo4j down / unhealthy), we silently fall back to
+    //    vector-only retrieval. The conversation still works, just without
+    //    relation-based context expansion.
     const seedIds = memories.map((m) => m.memory.id);
-    if (seedIds.length > 0) {
-      const neighbors = await this.store.neo4j.oneHopNeighbors(seedIds);
-      for (const n of neighbors) {
-        if (seen.has(n.id)) continue;
-        if (n.visibility === "private" && n.source_session !== sessionId) continue;
-        seen.add(n.id);
-        memories.push({
-          memory: n,
-          score: 0.5,
-          source: "graph",
-          matchSnippet: computeMatchSnippet(query, n),
-        });
+    if (seedIds.length > 0 && !this.store.isGraphDegraded()) {
+      try {
+        const neighbors = await this.store.neo4j.oneHopNeighbors(seedIds);
+        for (const n of neighbors) {
+          if (seen.has(n.id)) continue;
+          if (n.visibility === "private" && n.source_session !== sessionId) continue;
+          seen.add(n.id);
+          memories.push({
+            memory: n,
+            score: 0.5,
+            source: "graph",
+            matchSnippet: computeMatchSnippet(query, n),
+          });
+        }
+      } catch (err) {
+        console.error("[mnemosyne] oneHopNeighbors failed, continuing vector-only:", err);
       }
     }
 
     // 4. Detect contradictions for every surviving hit. Drives the
-    //    ⚠️ Conflicts with: ... line in the rendered block.
-    for (const hit of memories) {
-      const contradictions = await this.store.neo4j.getContradictions(hit.memory.id);
-      if (contradictions.length) hit.conflicts_with = contradictions;
+    //    ⚠️ Conflicts with: ... line in the rendered block. Skipped under
+    //    graph degradation — no graph, no conflicts to read.
+    if (!this.store.isGraphDegraded()) {
+      for (const hit of memories) {
+        try {
+          const contradictions = await this.store.neo4j.getContradictions(hit.memory.id);
+          if (contradictions.length) hit.conflicts_with = contradictions;
+        } catch {
+          // Per-hit failure — skip just this one.
+        }
+      }
     }
 
     // 5. Rerank and slice top-K.

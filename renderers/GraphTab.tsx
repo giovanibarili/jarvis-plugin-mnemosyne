@@ -544,6 +544,17 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
                   };
                   return labels[rel] ?? "→ relates";
                 },
+                title: (edge: any) => {
+                  const props = edge?.raw?.properties ?? edge?.properties ?? {};
+                  const reason = props.reason;
+                  const evidence = props.evidence;
+                  if (!reason && !evidence) return undefined;
+                  const parts: string[] = [];
+                  if (reason) parts.push(reason);
+                  if (evidence) parts.push(`Evidence: ${evidence}`);
+                  // vis-network accepts a DOM element or plain string for tooltip
+                  return parts.join("\n");
+                },
                 color: (edge: any) => {
                   const rel = edge?.raw?.properties?.relation ?? edge?.properties?.relation;
                   // semantic palette: reinforces=green, extends=blue,

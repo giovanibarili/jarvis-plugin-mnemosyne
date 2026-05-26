@@ -64,14 +64,18 @@ const checks: PreflightCheck[] = [
       }
     },
   },
-  ...[7687, 7474, 8765].map<PreflightCheck>((port) => ({
+  // Only Chroma's port (8765) is enforced at preflight. Neo4j ports
+  // (7687 / 7474) are checked lazily in runtime via lib/neo4j-status.ts —
+  // a stopped Docker daemon would falsely "free" them and trick preflight
+  // into passing while the container is actually down. Better to detect the
+  // real state when we try to use Neo4j and degrade soft.
+  ...[8765].map<PreflightCheck>((port) => ({
     name: `port-${port}`,
     fn: async () => {
       const inUse = await isPortInUse(port);
       if (!inUse) return { ok: true };
 
       // Port is bound. Check if it's bound by OUR own service (re-boot scenario).
-      // 7687 / 7474 → mnemosyne-neo4j container; 8765 → Chroma heartbeat.
       const ownedByUs = await isPortOwnedByMnemosyne(port);
       if (ownedByUs) {
         return { ok: true };

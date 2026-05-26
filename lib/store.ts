@@ -13,12 +13,32 @@ import { Logger } from "./logger";
  * over-abstracted (e.g. raw vector queries, one-hop graph traversal).
  */
 export class MnemosyneStore {
+  /**
+   * Runtime degradation flag. When true, Neo4j is unreachable and any
+   * Neo4j-side operation is skipped instead of throwing. Set by the
+   * bootstrap when the Neo4j probe fails — see `pieces/index.ts`.
+   *
+   * The graph layer is REBUILDABLE from markdown via `scripts/rebuild-indexes.ts`,
+   * so skipping writes here is safe: the canonical store stays correct and
+   * the graph re-syncs once Neo4j comes back.
+   */
+  private graphDegraded = false;
+
   constructor(
     public markdownStore: MarkdownStore,
     public chroma: ChromaAdapter,
     public neo4j: Neo4jAdapter,
     public logger: Logger
   ) {}
+
+  /** Toggle runtime graph degradation. Idempotent. */
+  setGraphDegraded(value: boolean): void {
+    this.graphDegraded = value;
+  }
+
+  isGraphDegraded(): boolean {
+    return this.graphDegraded;
+  }
 
   /** Atomic write: markdown first (canonical), then Chroma, then Neo4j. Rollback on failure. */
   async write(memory: Memory): Promise<void> {
@@ -47,13 +67,18 @@ export class MnemosyneStore {
       throw new Error(`Chroma upsert failed; rolled back markdown: ${e}`);
     }
 
-    // 3. Neo4j
+    // 3. Neo4j — skipped (and no rollback) when graph is degraded. The
+    // markdown + chroma pair remains the canonical record; the graph node
+    // is recreated by scripts/rebuild-indexes.ts once Neo4j is back.
+    if (this.graphDegraded) return;
     try {
       await this.neo4j.upsertMemory(memory);
     } catch (e) {
-      await this.chroma.delete(layer, memory.id);
-      await this.markdownStore.delete(memory.id);
-      throw new Error(`Neo4j upsert failed; rolled back markdown + chroma: ${e}`);
+      // Degrade-on-fail: mark the store so subsequent writes don't keep
+      // retrying, and DO NOT roll back markdown+chroma — they're the source
+      // of truth. The user already has a notification from bootstrap.
+      this.graphDegraded = true;
+      console.error("[mnemosyne-store] " + `neo4j upsert failed mid-flight, marking graphDegraded: ${e}`);
     }
   }
 
@@ -62,13 +87,26 @@ export class MnemosyneStore {
     if (!mem) return;
     const layer = mem.promoted_at ? "long" : "short";
 
-    await this.neo4j.deleteMemory(id);
+    if (!this.graphDegraded) {
+      try {
+        await this.neo4j.deleteMemory(id);
+      } catch (e) {
+        this.graphDegraded = true;
+        console.error("[mnemosyne-store] " + `neo4j delete failed, marking graphDegraded: ${e}`);
+      }
+    }
     await this.chroma.delete(layer, id);
     await this.markdownStore.delete(id);
   }
 
   async incrementReinforcements(id: string): Promise<void> {
-    await this.neo4j.incrementReinforcements(id);
+    if (this.graphDegraded) return;
+    try {
+      await this.neo4j.incrementReinforcements(id);
+    } catch (e) {
+      this.graphDegraded = true;
+      console.error("[mnemosyne-store] " + `neo4j incrementReinforcements failed: ${e}`);
+    }
     // Markdown is updated lazily on next consolidator run (Neo4j is the
     // source of truth for counters).
   }
@@ -89,7 +127,13 @@ export class MnemosyneStore {
       await this.ensureChromaLong(mem);
     }
 
-    await this.neo4j.markPromoted(id, Date.now());
+    if (this.graphDegraded) return;
+    try {
+      await this.neo4j.markPromoted(id, Date.now());
+    } catch (e) {
+      this.graphDegraded = true;
+      console.error("[mnemosyne-store] " + `neo4j markPromoted failed: ${e}`);
+    }
   }
 
   /** Upsert a memory directly into the long Chroma layer. Safe to call multiple times. */

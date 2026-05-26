@@ -14,23 +14,68 @@ export interface Neo4jAdapterOptions {
   uri: string;
 }
 
+/**
+ * Thrown when an operation is attempted while the adapter is not connected.
+ * The plugin's runtime guards (store / retriever / consolidator) catch this
+ * and treat it as "graph degraded" — they fall back to vector-only behaviour
+ * instead of propagating the failure to the user.
+ */
+export class Neo4jNotReadyError extends Error {
+  constructor(public reason: string = "Adapter not connected") {
+    super(reason);
+    this.name = "Neo4jNotReadyError";
+  }
+}
+
 export class Neo4jAdapter {
   private driver?: Driver;
 
   constructor(private opts: Neo4jAdapterOptions) {}
 
-  async connect(): Promise<void> {
+  /**
+   * Connect with a hard timeout. The Neo4j driver's `verifyConnectivity()`
+   * may hang indefinitely when the server is reachable on TCP but not
+   * responding to Bolt (e.g. Neo4j still booting inside the container).
+   * Wrapping in Promise.race prevents the whole bootstrap from blocking.
+   *
+   * @param timeoutMs default 2000 — fail-soft is preferred over slow boot.
+   */
+  async connect(timeoutMs: number = 2000): Promise<void> {
     // NEO4J_AUTH=none — no credentials passed
-    this.driver = neo4j.driver(this.opts.uri);
-    await this.driver.verifyConnectivity();
+    const drv = neo4j.driver(this.opts.uri, undefined, {
+      connectionTimeout: timeoutMs,
+      connectionAcquisitionTimeout: timeoutMs,
+    });
+    try {
+      await Promise.race([
+        drv.verifyConnectivity(),
+        new Promise<never>((_, rej) =>
+          setTimeout(() => rej(new Neo4jNotReadyError(`verifyConnectivity timeout after ${timeoutMs}ms`)), timeoutMs),
+        ),
+      ]);
+      this.driver = drv;
+    } catch (e) {
+      // Avoid leaking the half-open driver if verifyConnectivity rejected
+      // before we stashed it. Best-effort close — ignore errors.
+      try { await drv.close(); } catch { /* noop */ }
+      this.driver = undefined;
+      if (e instanceof Neo4jNotReadyError) throw e;
+      throw new Neo4jNotReadyError(String((e as Error)?.message ?? e));
+    }
+  }
+
+  /** True when verifyConnectivity succeeded and the driver is live. */
+  isReady(): boolean {
+    return this.driver !== undefined;
   }
 
   async close(): Promise<void> {
     await this.driver?.close();
+    this.driver = undefined;
   }
 
   private session(): Session {
-    if (!this.driver) throw new Error("Adapter not connected");
+    if (!this.driver) throw new Neo4jNotReadyError();
     return this.driver.session();
   }
 
@@ -192,7 +237,9 @@ export class Neo4jAdapter {
     aId: string,
     bId: string,
     relation: string,
-    score: number
+    score: number,
+    reason?: string,
+    evidence?: string
   ): Promise<void> {
     const s = this.session();
     try {
@@ -201,8 +248,10 @@ export class Neo4jAdapter {
          MERGE (a)-[r:RELATES_TO {relation: $relation}]->(b)
          SET r.score      = $score,
              r.source     = 'semantic',
-             r.created_at = $now`,
-        { aId, bId, relation, score, now: Date.now() }
+             r.created_at = $now,
+             r.reason     = $reason,
+             r.evidence   = $evidence`,
+        { aId, bId, relation, score, now: Date.now(), reason: reason ?? null, evidence: evidence ?? null }
       );
     } finally {
       await s.close();
@@ -220,6 +269,8 @@ export class Neo4jAdapter {
       targetId: string;
       relation: string;
       score: number;
+      reason?: string;
+      evidence?: string;
       direction: "outgoing" | "incoming";
     }>
   > {
@@ -230,6 +281,8 @@ export class Neo4jAdapter {
          RETURN other.id AS targetId,
                 r.relation AS relation,
                 r.score AS score,
+                r.reason AS reason,
+                r.evidence AS evidence,
                 CASE WHEN startNode(r).id = $id THEN 'outgoing' ELSE 'incoming' END AS direction`,
         { id }
       );
@@ -237,6 +290,8 @@ export class Neo4jAdapter {
         targetId: rec.get("targetId"),
         relation: rec.get("relation"),
         score: rec.get("score")?.toNumber?.() ?? rec.get("score"),
+        reason: rec.get("reason") ?? undefined,
+        evidence: rec.get("evidence") ?? undefined,
         direction: rec.get("direction") as "outgoing" | "incoming",
       }));
     } finally {
@@ -324,10 +379,10 @@ export class Neo4jAdapter {
       RETURN
         rootId,
         parent.id AS parentId, parent.title AS parentTitle,
-        parent.category AS parentCategory, rp.relation AS parentRelation,
+        parent.category AS parentCategory, rp.relation AS parentRelation, rp.reason AS parentReason,
         count(DISTINCT parentChild) AS parentChildCount,
         child.id AS childId, child.title AS childTitle,
-        child.category AS childCategory, rc.relation AS childRelation,
+        child.category AS childCategory, rc.relation AS childRelation, rc.reason AS childReason,
         count(DISTINCT grandchild) AS childGrandchildCount
     `,
       { ids }
@@ -350,6 +405,7 @@ export class Neo4jAdapter {
               "relates_to") as RelateRelation,
             direction: "incoming",
             childCount: toNum(row.parentChildCount),
+            reason: (row.parentReason as string) ?? undefined,
           });
         }
       }
@@ -363,6 +419,7 @@ export class Neo4jAdapter {
               "relates_to") as RelateRelation,
             direction: "outgoing",
             childCount: toNum(row.childGrandchildCount),
+            reason: (row.childReason as string) ?? undefined,
           });
         }
       }

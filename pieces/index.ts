@@ -649,6 +649,25 @@ function registerHttpRoutes(
   });
 
   /**
+   * GET /memory/:id
+   *
+   * Fetch a single memory by ID. Used by the Graph tab when clicking a node
+   * that is a graph neighbor (not present in the panel's preloaded list).
+   */
+  ctx.registerRoute("GET", `${base}/memory`, async (req: any, res: any) => {
+    try {
+      const url = new URL(req.url, "http://localhost");
+      const id = url.searchParams.get("id") ?? "";
+      if (!id) return jsonResponse(res, 400, { ok: false, error: "missing 'id'" });
+      const mem = await store.markdownStore.read(id).catch(() => null);
+      if (!mem) return jsonResponse(res, 404, { ok: false, error: "not found" });
+      jsonResponse(res, 200, { memory: mem });
+    } catch (e) {
+      jsonResponse(res, 500, { ok: false, error: String(e) });
+    }
+  });
+
+    /**
    * GET /search?q=<query>[&k=<topK>]
    *
    * Unified semantic search endpoint used by both List and Graph tabs.

@@ -96,6 +96,8 @@ export default function MnemosynePanel({ state }: Props) {
   const [filterLayer, setFilterLayer] = useState<FilterLayer>("all");
   const [filterProject, setFilterProject] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Memory fetched on demand when clicked node is not in the preloaded list
+  const [fetchedMemory, setFetchedMemory] = useState<Memory | null>(null);
   const [actionStatus, setActionStatus] = useState<string>("");
   const [statsCollapsed, setStatsCollapsed] = useState<boolean>(false);
 
@@ -167,9 +169,21 @@ export default function MnemosynePanel({ state }: Props) {
   }, [memories, searchHits, debouncedSearch, filterCategory, filterLayer, filterProject]);
 
   const selected = useMemo(
-    () => (selectedId ? memories.find((m) => m.id === selectedId) ?? null : null),
-    [selectedId, memories],
+    () => {
+      if (!selectedId) return null;
+      return memories.find((m) => m.id === selectedId) ?? fetchedMemory ?? null;
+    },
+    [selectedId, memories, fetchedMemory],
   );
+
+  // When selectedId changes and isn't in the preloaded list, fetch from backend
+  useEffect(() => {
+    if (!selectedId) { setFetchedMemory(null); return; }
+    if (memories.find((m) => m.id === selectedId)) { setFetchedMemory(null); return; }
+    getJson(`${PLUGIN_BASE}/memory?id=${encodeURIComponent(selectedId)}`)
+      .then((r: any) => r?.memory ? setFetchedMemory(r.memory as Memory) : setFetchedMemory(null))
+      .catch(() => setFetchedMemory(null));
+  }, [selectedId, memories]);
 
   const flash = (msg: string) => {
     setActionStatus(msg);
