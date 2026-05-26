@@ -168,32 +168,32 @@ export default function MnemosynePanel({ state }: Props) {
     });
   }, [memories, searchHits, debouncedSearch, filterCategory, filterLayer, filterProject]);
 
-  const selected = useMemo(
-    () => {
-      if (!selectedId) return null;
-      const inList = memories.find((m) => m.id === selectedId);
-      if (inList) return inList;
-      // Use fetchedMemory only when it matches the current selection
-      if (fetchedMemory && fetchedMemory.id === selectedId) return fetchedMemory;
-      return null;
-    },
-    [selectedId, memories, fetchedMemory],
-  );
+  // selected: the memory to show in the detail pane.
+  // Priority: preloaded list > fetchedMemory (must match selectedId).
+  const selected = useMemo(() => {
+    if (!selectedId) return null;
+    return memories.find((m) => m.id === selectedId) ?? 
+      (fetchedMemory?.id === selectedId ? fetchedMemory : null);
+  }, [selectedId, memories, fetchedMemory]);
 
-  // When selectedId changes and isn't in the preloaded list, fetch from backend.
-  // We do NOT clear fetchedMemory immediately to avoid the flicker where selected
-  // becomes null between the click and the fetch completing.
+  // Fetch on-demand when the clicked node is not in the preloaded list.
+  // Clear immediately on every selectedId change to avoid showing stale data.
   useEffect(() => {
-    if (!selectedId) { setFetchedMemory(null); return; }
-    if (memories.find((m) => m.id === selectedId)) {
-      // In the preloaded list — clear any stale fetched memory
-      setFetchedMemory(null);
-      return;
-    }
-    // Not in list — fetch without clearing first (avoids flicker)
+    // Always clear stale fetchedMemory when selection changes
+    setFetchedMemory(null);
+
+    if (!selectedId) return;
+    if (memories.find((m) => m.id === selectedId)) return; // already in list
+
+    let cancelled = false;
     getJson(`${PLUGIN_BASE}/memory?id=${encodeURIComponent(selectedId)}`)
-      .then((r: any) => r?.memory ? setFetchedMemory(r.memory as Memory) : setFetchedMemory(null))
-      .catch(() => setFetchedMemory(null));
+      .then((r: any) => {
+        if (!cancelled) {
+          setFetchedMemory(r?.memory ? (r.memory as Memory) : null);
+        }
+      })
+      .catch(() => { if (!cancelled) setFetchedMemory(null); });
+    return () => { cancelled = true; };
   }, [selectedId, memories]);
 
   const flash = (msg: string) => {
