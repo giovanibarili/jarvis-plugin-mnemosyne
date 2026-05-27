@@ -37,10 +37,11 @@ export class EncoderPiece implements Piece {
     pipeline: {
       triage:   { calls: 0, costUsd: 0 },
       classify: { calls: 0, costUsd: 0 },
+      enrich:   { calls: 0, costUsd: 0 },
       relate:   { calls: 0, costUsd: 0 },
     },
   };
-  private _activeStep: "triage" | "classify" | "relate" | null = null;
+  private _activeStep: "triage" | "classify" | "enrich" | "relate" | null = null;
 
   constructor(
     private store: MnemosyneStore,
@@ -62,6 +63,7 @@ export class EncoderPiece implements Piece {
       pipeline: {
         triage:   { ...this._stats.pipeline.triage },
         classify: { ...this._stats.pipeline.classify },
+        enrich:   { ...this._stats.pipeline.enrich },
         relate:   { ...this._stats.pipeline.relate },
       },
     };
@@ -131,6 +133,10 @@ export class EncoderPiece implements Piece {
       if (spend.classify > 0 || !result.skipped) {
         this._stats.pipeline.classify.calls++;
         this._stats.pipeline.classify.costUsd += spend.classify;
+      }
+      if (spend.enrich != null && spend.enrich > 0) {
+        this._stats.pipeline.enrich.calls++;
+        this._stats.pipeline.enrich.costUsd += spend.enrich;
       }
       if (spend.relate > 0) {
         this._stats.pipeline.relate.calls++;

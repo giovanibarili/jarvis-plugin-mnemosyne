@@ -39,12 +39,13 @@ async function triggerRefresh(): Promise<void> {
 type StepState = "active" | "next" | "idle";
 
 function stepState(
-  step: "triage" | "classify" | "relate",
-  activeStep: "triage" | "classify" | "relate" | null
+  step: "triage" | "classify" | "enrich" | "relate",
+  activeStep: "triage" | "classify" | "enrich" | "relate" | null
 ): StepState {
   if (activeStep === step) return "active";
   if (activeStep === "triage"   && step === "classify") return "next";
-  if (activeStep === "classify" && step === "relate")   return "next";
+  if (activeStep === "classify" && step === "enrich")   return "next";
+  if (activeStep === "enrich"   && step === "relate")   return "next";
   return "idle";
 }
 
@@ -52,12 +53,13 @@ function stepState(
 // pipeline). classify = 1 if triage just passed (turn is in classify now),
 // relate = 1 if classify just passed. Both are derived from activeStep.
 function stepQueue(
-  step: "triage" | "classify" | "relate",
+  step: "triage" | "classify" | "enrich" | "relate",
   queueDepth: number,
-  activeStep: "triage" | "classify" | "relate" | null
+  activeStep: "triage" | "classify" | "enrich" | "relate" | null
 ): number {
   if (step === "triage")   return activeStep ? queueDepth : 0;
-  if (step === "classify") return activeStep === "classify" || activeStep === "relate" ? 1 : 0;
+  if (step === "classify") return activeStep === "classify" || activeStep === "enrich" || activeStep === "relate" ? 1 : 0;
+  if (step === "enrich")   return activeStep === "enrich" || activeStep === "relate" ? 1 : 0;
   if (step === "relate")   return activeStep === "relate" ? 1 : 0;
   return 0;
 }
@@ -71,7 +73,7 @@ const STEP_COLORS: Record<StepState, { bar: string; label: string; bg: string; q
 function PipelineTableRow({
   step, stats, state, queue,
 }: {
-  step: "triage" | "classify" | "relate";
+  step: "triage" | "classify" | "enrich" | "relate";
   stats: PipelineStepStats;
   state: StepState;
   queue: number;
@@ -166,7 +168,7 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
                   <span style={s.pipelineSpend}>SPEND</span>
                   <span style={s.pipelineQueueBadge}>Q</span>
                 </div>
-                {(["triage", "classify", "relate"] as const).map((step) => (
+                {(["triage", "classify", "enrich", "relate"] as const).map((step) => (
                   <PipelineTableRow
                     key={step}
                     step={step}

@@ -24,6 +24,7 @@ export interface EncoderV12Sink {
 export interface PipelineSpend {
   triage: number;
   classify: number;
+  enrich: number;
   relate: number;
   total: number;
 }
@@ -78,7 +79,7 @@ export class EncoderV12 {
   async process(
     turn: string,
     sessionId: string,
-    onStep?: (step: "triage" | "classify" | "relate") => void,
+    onStep?: (step: "triage" | "classify" | "enrich" | "relate") => void,
     skipTriage?: boolean
   ): Promise<EncoderV12Result> {
     let triageCost = 0;
@@ -122,7 +123,7 @@ export class EncoderV12 {
           skipReason: triage.reason,
           memories: [],
           intraTurnEdges: [],
-          spend: { triage: triageCost, classify: 0, relate: 0, total: triageCost },
+          spend: { triage: triageCost, classify: 0, enrich: 0, relate: 0, total: triageCost },
         };
       }
     }
@@ -173,7 +174,7 @@ export class EncoderV12 {
         skipReason: "all_candidates_dropped",
         memories: [],
         intraTurnEdges: [],
-        spend: { triage: triageCost, classify: classifyCost, relate: 0, total: totalCost },
+        spend: { triage: triageCost, classify: classifyCost, enrich: 0, relate: 0, total: totalCost },
       };
     }
 
@@ -190,6 +191,7 @@ export class EncoderV12 {
       };
       // Step 3a: Semantic enrichment — append domain synonyms before embedding
       if (this.enricher) {
+        onStep?.("enrich");
         draft = await this.enricher.enrich(draft);
       }
       const written = await this.opts.sink.write(draft);
@@ -210,8 +212,9 @@ export class EncoderV12 {
     const intraTurnEdges = await this.intraTurn.relate(nodes);
     const relateCost = (this.intraTurn as any).lastCostUsd ?? 0;
 
-    const totalCost = triageCost + classifyCost + relateCost;
-    const spend: PipelineSpend = { triage: triageCost, classify: classifyCost, relate: relateCost, total: totalCost };
+    const enrichCost = this.enricher ? (this.enricher as any).cost ?? 0 : 0;
+    const totalCost = triageCost + classifyCost + enrichCost + relateCost;
+    const spend: PipelineSpend = { triage: triageCost, classify: classifyCost, enrich: enrichCost, relate: relateCost, total: totalCost };
     const result: EncoderV12Result = { skipped: false, memories, intraTurnEdges, spend };
 
     await this.opts.logger?.logExtraction({

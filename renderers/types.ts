@@ -105,9 +105,10 @@ export interface RuntimeStats {
     pipeline: {
       triage:   PipelineStepStats;
       classify: PipelineStepStats;
+      enrich:   PipelineStepStats;
       relate:   PipelineStepStats;
     };
-    activeStep: "triage" | "classify" | "relate" | null;
+    activeStep: "triage" | "classify" | "enrich" | "relate" | null;
   };
   retriever: {
     retrievals: number;
