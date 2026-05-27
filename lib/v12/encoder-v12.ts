@@ -183,20 +183,45 @@ export class EncoderV12 {
 
     // Step 3: Persist
     const now = new Date().toISOString();
-    const memories: EncodedMemory[] = [];
-    for (const c of finalCandidates) {
-      let draft: EncodedMemory = {
+
+    // Step 3a: Semantic enrichment — run all candidates in PARALLEL with timeout.
+    // Serial enrichment blocks the entire encoder queue; parallel + timeout prevents that.
+    let enrichedCandidates: EncodedMemory[];
+    if (this.enricher) {
+      onStep?.("enrich");
+      const ENRICH_TIMEOUT_MS = 8_000;
+      const withTimeout = (p: Promise<EncodedMemory>): Promise<EncodedMemory> =>
+        Promise.race([
+          p,
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("enrich timeout")), ENRICH_TIMEOUT_MS)
+          ),
+        ]);
+      const drafts: EncodedMemory[] = finalCandidates.map((c) => ({
         ...c,
         id: `${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         session_id: sessionId,
         created_at: now,
-        origin_source: "user",
-      };
-      // Step 3a: Semantic enrichment — append domain synonyms before embedding
-      if (this.enricher) {
-        onStep?.("enrich");
-        draft = await this.enricher.enrich(draft);
-      }
+        origin_source: "user" as const,
+      }));
+      const results = await Promise.allSettled(
+        drafts.map((d) => withTimeout(this.enricher!.enrich(d)))
+      );
+      enrichedCandidates = results.map((r, i) =>
+        r.status === "fulfilled" ? r.value : drafts[i]
+      );
+    } else {
+      enrichedCandidates = finalCandidates.map((c) => ({
+        ...c,
+        id: `${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        session_id: sessionId,
+        created_at: now,
+        origin_source: "user" as const,
+      }));
+    }
+
+    const memories: EncodedMemory[] = [];
+    for (const draft of enrichedCandidates) {
       const written = await this.opts.sink.write(draft);
       memories.push({ ...draft, id: written.id });
     }
