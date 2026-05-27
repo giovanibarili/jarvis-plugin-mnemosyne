@@ -690,6 +690,9 @@ function registerHttpRoutes(
    * Both tabs show seeds + neighbors, identical to what gets injected
    * into the system prompt.
    */
+  // Capture weights at registration time — avoids closure dependency on `config`
+  // which may not survive module cache invalidation on hot-reload.
+  const _searchRerankWeights = { ...config.retriever.rerank_weights };
   ctx.registerRoute("GET", `${base}/search`, async (req: any, res: any) => {
     try {
       const url = new URL(req.url, "http://localhost");
@@ -715,7 +718,8 @@ function registerHttpRoutes(
         hydrated.push({ mem, vectorSim: 1 - hit.distance });
       }
 
-      // 3. Rerank — same weights as the retriever pipeline
+      // 3. Rerank — same weights captured at route registration time.
+      const _reranker = new Reranker(_searchRerankWeights);
       let memories: any[];
       if (hydrated.length > 0) {
         const rerankHits = hydrated.map(({ mem, vectorSim }) => ({
@@ -724,7 +728,7 @@ function registerHttpRoutes(
           source: "vector" as const,
           vectorSim,
         }));
-        const sorted = reranker.rerank(rerankHits);
+        const sorted = _reranker.rerank(rerankHits);
         memories = sorted.map((h) => {
           const bd = h.scoreBreakdown;
           return {
