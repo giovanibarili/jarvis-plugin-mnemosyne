@@ -71,8 +71,11 @@ export class EncoderV12 {
     this.gate = new CategoryGate(opts.catalog, opts.pending, this.classify, opts.gateCfg);
     const judge = new RelateJudge(opts.llm, opts.promptPaths.relate, opts.model);
     this.intraTurn = new IntraTurnRelate(judge, opts.intraTurnCfg);
+    // Note: opts.logger is the Mnemosyne file-logger (no .warn/.debug methods).
+    // EnrichV12 needs a pino-compatible logger — pass undefined so it silently
+    // falls back to returning the original draft on any error.
     this.enricher = opts.enrichCfg?.enabled
-      ? new EnrichV12(opts.llm, opts.enrichCfg.model, opts.logger)
+      ? new EnrichV12(opts.llm, opts.enrichCfg.model)
       : null;
   }
 

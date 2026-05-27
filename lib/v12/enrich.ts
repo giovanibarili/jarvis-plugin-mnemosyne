@@ -1,6 +1,11 @@
 import type { LLMClient } from "../extractor";
 import type { EncodedMemory } from "./encoder-v12";
-import type { Logger } from "pino";
+
+// Minimal pino-compatible logger interface — avoids importing pino type directly
+interface PinoLike {
+  warn(obj: object, msg?: string): void;
+  debug(obj: object, msg?: string): void;
+}
 
 /**
  * EnrichV12 — semantic enrichment step between classify and store.
@@ -27,7 +32,7 @@ export class EnrichV12 {
   constructor(
     private readonly llm: LLMClient,
     private readonly model: string,
-    private readonly logger?: Logger,
+    private readonly logger?: PinoLike,
   ) {}
 
   get cost(): number {
