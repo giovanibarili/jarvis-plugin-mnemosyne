@@ -25,11 +25,11 @@ export function formatNeighborhood(n: MemoryNeighborhood): string {
   // Reason is truncated to keep context scannable.
   for (const p of n.parents) {
     const why = p.reason ? `  // ${p.reason.slice(0, 80)}` : "";
-    lines.push(`  ↑ ${p.title} — ${p.relation}  (id:${p.id.slice(0, 8)})${why}`);
+    lines.push(`  ↑ ${p.title} — ${p.relation}  (id:${p.id})${why}`);
   }
   for (const c of n.children) {
     const why = c.reason ? `  // ${c.reason.slice(0, 80)}` : "";
-    lines.push(`  ↓ ${c.title} — ${c.relation}  (id:${c.id.slice(0, 8)})${why}`);
+    lines.push(`  ↓ ${c.title} — ${c.relation}  (id:${c.id})${why}`);
   }
   return lines.join("\n");
 }
@@ -537,15 +537,19 @@ export class RetrieverPiece {
    * Both signals are best-effort: failures are silently swallowed.
    */
   private async _parseFeedback(text: string): Promise<void> {
-    // Resolve a short prefix (8 chars) to a full UUID using recent hits across sessions.
-    const resolve = (prefix: string): string | null => {
-      if (prefix.length > 16) return prefix; // already a full UUID
+    // Resolve a short ID (8 chars) to a full UUID using recent hits across sessions.
+    // The rendered id: field uses the LAST 8 chars (unique suffix) — match by endsWith.
+    // Also try startsWith for backward compat with any old format still in circulation.
+    const resolve = (shortId: string): string | null => {
+      if (shortId.length > 16) return shortId; // already a full UUID
       for (const hits of this.lastHits.values()) {
         for (const h of hits) {
-          if (h.memory.id.startsWith(prefix)) return h.memory.id;
+          if (h.memory.id.endsWith(shortId) || h.memory.id.startsWith(shortId)) {
+            return h.memory.id;
+          }
         }
       }
-      return prefix.length >= 32 ? prefix : null; // reject very short IDs
+      return shortId.length >= 32 ? shortId : null; // reject very short IDs
     };
 
     // Match [mnemo:used:ID]
@@ -623,7 +627,9 @@ export class RetrieverPiece {
       if (neighborhood) lines.push(neighborhood);
 
       // id — use with memory_fetch(id), [mnemo:used:ID], [mnemo:update:ID:...]
-      lines.push(`  id:${m.id.slice(0, 8)}`);
+      // Use the last 8 chars of the UUID: the suffix is unique across all memories
+      // while the prefix (actor-mn, manual-t) is shared and causes collisions.
+      lines.push(`  id:${m.id}`);
 
       lines.push("");
     });

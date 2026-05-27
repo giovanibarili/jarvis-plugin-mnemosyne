@@ -46,6 +46,10 @@ import {
   buildMemoryPromoteTool,
 } from "../lib/tools/memory-management.js";
 import {
+  buildMemoryReinforce,
+  buildMemoryAddEvidence,
+} from "../lib/tools/memory-feedback.js";
+import {
   buildWorkflowListTool,
   buildWorkflowGetTool,
   buildWorkflowReplayTool,
@@ -878,10 +882,7 @@ Signal guide:
 1. **Apply automatically** — when injected memories are relevant, use them without being asked.
 2. **Follow leads** — call \`memory_fetch(id)\` on any ↑/↓ relation that seems relevant. The ID is the \`id:\` at the bottom of each entry.
 3. **Search when uncertain** — call \`memory_search\` before assuming anything about the user's preferences, stack, or past decisions.
-4. **Emit feedback** at the very end of your reply (invisible to the user):
-   - \`[mnemo:used:XXXXXXXX]\` — if a memory was directly useful
-   - \`[mnemo:update:XXXXXXXX:one sentence]\` — if you discovered new evidence worth adding
-   - **Never fabricate IDs.** Only use the \`id:\` values shown in injected memory entries.
+4. **Give feedback via tools** — use the dedicated tools, not inline text signals:\n   - \`memory_reinforce(id)\` — if a memory was directly useful in your answer\n   - \`memory_add_evidence(id, evidence)\` — if you discovered new evidence worth adding to a memory\n   - Pass the **full id** shown as \`id:\` at the bottom of each memory entry.
 `,
   };
 }
@@ -1084,6 +1085,11 @@ function registerTools(
   reg.register(buildMnemosyneConsolidateTool(consolidator));
   reg.register(buildMnemosyneStatsTool(store));
   reg.register(buildMnemosyneTriageTool(encoder));
+
+  // Feedback tools — explicit tool-based replacement for fragile text signals.
+  // These replace [mnemo:used:ID] and [mnemo:update:ID:...] inline text signals.
+  reg.register(buildMemoryReinforce(store));
+  reg.register(buildMemoryAddEvidence(store));
 
   // v1.3 Graph Retrieval — memory_fetch tool (gated by config)
   // t-4 wires graphNeighborhood at bootstrap level; until that lands, we
