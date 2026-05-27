@@ -276,10 +276,26 @@ The following memories were retrieved by Mnemosyne based on the current conversa
 
 ${block}
 
-## Memory feedback (important)
-If a memory above was directly useful to answer the current request, emit [mnemo:used:ID] once in your response (ID is the memory's short id shown after "id:" in the detail pane, or the first 8 chars of the id field visible in the block above via the id field on each memory).
-If you learned new evidence or context that would enrich a specific memory, emit [mnemo:update:ID:one sentence of new evidence] — keep it factual and concise.
-These signals are invisible to the user and help the memory system learn what is relevant. Only emit them when genuinely applicable — not for every response.
+## Thinking protocol — Mnemosyne-first
+During your internal reasoning (thinking phase), treat memory tools as your primary knowledge source:
+
+1. **Before assuming anything** about the user's preferences, stack, decisions, or past work —
+   call `memory_search` first. Training data is the last resort.
+
+2. **Follow leads** — if the injection above shows relations (↑ parents, ↓ children), call
+   `memory_fetch(id)` on relevant ones during thinking to explore the knowledge graph.
+
+3. **Search multiple angles** — one search is rarely enough. Search by project, by pattern type,
+   by specific technology. Each search is cheap; assumptions are expensive.
+
+4. **Validate before committing** — if you are about to propose an architecture, tool, or approach,
+   search for past decisions on that topic first.
+
+## Memory feedback
+After responding, if a memory was directly useful emit `[mnemo:used:ID]` once.
+If you discovered new evidence worth storing emit `[mnemo:update:ID:one sentence]`.
+ID = the 8-char prefix shown as `id:XXXXXXXX` at the end of each memory block above.
+These signals are invisible to the user. Only emit when genuinely applicable.
 </system-reminder>`;
 
       return [wrapped];

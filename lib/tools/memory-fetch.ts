@@ -26,9 +26,18 @@ export function buildMemoryFetchTool(
 ): CapabilityDefinition {
   return {
     name: "memory_fetch",
-    description:
-      "Fetch a memory by ID with its full relational neighborhood (parents, children, grandchildren). " +
-      "Use when you want to deeply explore a memory found in context or navigate the knowledge graph.",
+    description: [
+      "Fetch a memory by ID with its full relational neighborhood (parents, children, grandchildren).",
+      "",
+      "Use this during thinking whenever:",
+      "- The injected context or memory_search results mention a related memory worth exploring",
+      "- You see a parent/child relation (↑/↓) in the injection block and want to follow the chain",
+      "- You need the full content + evidence of a specific memory before reasoning about it",
+      "- You want to understand why a decision was made (evidence field) before building on it",
+      "",
+      "Call during the thinking phase — not just reactively. Proactively fetch memories that seem",
+      "relevant to the current task even if not explicitly referenced by the user.",
+    ].join("\n"),
     input_schema: {
       type: "object",
       properties: {
