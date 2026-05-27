@@ -368,15 +368,16 @@ export class RetrieverPiece {
     // "drop any match that's more orthogonal than aligned with the query".
     // Tunable via config so we can A/B different thresholds without code changes.
     const minSim = this.opts.minVectorSim ?? 0.0;
+    let droppedSim = 0, droppedMem = 0, droppedPrivacy = 0;
     for (const ch of allChromaHits) {
       if (seen.has(ch.id)) continue;
       const vectorSim = 1 - ch.distance;
       // Apply the threshold BEFORE hydrating from markdown — saves I/O on
       // hits we'll discard anyway.
-      if (vectorSim < minSim) continue;
+      if (vectorSim < minSim) { droppedSim++; continue; }
       const mem = await this.store.markdownStore.read(ch.id);
-      if (!mem) continue;
-      if (mem.visibility === "private" && mem.source_session !== sessionId) continue;
+      if (!mem) { droppedMem++; continue; }
+      if (mem.visibility === "private" && mem.source_session !== sessionId) { droppedPrivacy++; continue; }
       seen.add(mem.id);
       // Preserve the raw vector similarity (1 - distance) BEFORE the reranker
       // overwrites .score with the weighted total. This is what the chat UI
@@ -400,6 +401,7 @@ export class RetrieverPiece {
     //    vector-only retrieval. The conversation still works, just without
     //    relation-based context expansion.
     const seedIds = memories.map((m) => m.memory.id);
+    log.debug({ sessionId, hydrated: memories.length, droppedSim, droppedMem, droppedPrivacy }, "mnemosyne: retrieve — hydration done");
     log.debug({ sessionId, seedIds: seedIds.length, graphDegraded: this.store.isGraphDegraded() }, "mnemosyne: retrieve — graph expand");
     if (seedIds.length > 0 && !this.store.isGraphDegraded()) {
       try {
