@@ -302,7 +302,19 @@ export class RetrieverPiece {
     if (hits.length > 0) this._stats.retrievalsWithHits++;
     log.info({ sid, hits: hits.length, workflowHits: workflowHits.length }, "mnemosyne: retriever — retrieved");
 
-    const block = this.format(hits, workflowHits);
+    // #1 — Filter UNRELATED hits before formatting.
+    // A hit is UNRELATED when it has a vectorSim that falls below the sim
+    // penalty floor used in the reranker (sim < -0.15) AND its rerank score
+    // did not recover enough (< 0.50). Graph hits have no vectorSim, so they
+    // are never filtered here (they were pulled by explicit relation).
+    const SIM_UNRELATED_THRESHOLD = -0.15;
+    const RERANK_UNRELATED_MIN   = 0.50;
+    const filteredHits = hits.filter((h) => {
+      if (h.source === "graph" || h.vectorSim == null) return true;
+      if (h.vectorSim < SIM_UNRELATED_THRESHOLD && h.score < RERANK_UNRELATED_MIN) return false;
+      return true;
+    });
+    const block = this.format(filteredHits, workflowHits);
     this.cache.set(sid, { lastUserMsg: lastMsg, block });
     this.lastHits.set(sid, hits); // expose for injector timeline payload
 

@@ -257,6 +257,31 @@ export function createPieces(ctx: PluginContext): Piece[] {
       const wrapped = `<system-reminder>
 The following memories were retrieved by Mnemosyne based on the current conversation context. Use them as background knowledge — past decisions, preferences, and patterns from previous sessions. Do not cite them verbatim unless directly relevant to the current task.
 
+### How to read this block
+
+Each memory entry has the format:
+
+\`\`\`
+[●|◦] [vector|graph]  [HIGH|MEDIUM|WEAK]  [category]  <title>
+  sim <cosine>  rerank <score>  ·  conf <confidence>  ·  reinf <reinforcements>
+  why: recency <r>  conf <c>  reinf <r>  graph <g>
+  matched on \`<terms>\`: <snippet>
+> <full memory content>
+⚠️ Conflicts with: <id-prefix>  (only when a conflict exists)
+  ↑ <title> — <relation-type>   (parent memories — broader context)
+  ↓ <title> — <relation-type>   (child memories — more specific detail)
+  id:<8-char-id>               ← USE THIS ID for memory_fetch / mnemo:used / mnemo:update
+\`\`\`
+
+Signal guide:
+- **● vector** = matched by semantic embedding; **◦ graph** = pulled by relation from a matched memory
+- **sim** = cosine similarity to query (negative = weak semantic overlap, pulled by graph or keyword)
+- **rerank** = final score after confidence × weight + reinforcements × weight + graph × weight
+- **conf** = extractor confidence when memory was created (0–1)
+- **reinf** = how many times this memory was reinforced by past retrievals
+- **↑ parent** = broader/more general context; **↓ child** = more specific sub-fact
+- **id:XXXXXXXX** = 8-char prefix — required for \`memory_fetch(id)\`, \`[mnemo:used:ID]\`, \`[mnemo:update:ID:...]\`
+
 ${block}
 
 ## Thinking protocol — Mnemosyne-first
@@ -265,20 +290,20 @@ During your internal reasoning (thinking phase), treat memory tools as your prim
 1. **Before assuming anything** about the user's preferences, stack, decisions, or past work —
    call \`memory_search\` first. Training data is the last resort.
 
-2. **Follow leads** — if the injection above shows relations (↑ parents, ↓ children), call
-   \`memory_fetch(id)\` on relevant ones during thinking to explore the knowledge graph.
+2. **Follow leads** — the ↑/↓ relations above show the knowledge graph. Call \`memory_fetch(id)\`
+   on any entry whose **id:XXXXXXXX** looks relevant. The ID is at the bottom of each memory block.
 
-3. **Search multiple angles** — one search is rarely enough. Search by project, by pattern type,
-   by specific technology. Each search is cheap; assumptions are expensive.
+3. **Search multiple angles** — one search is rarely enough. Search by project, by pattern, by term.
+   Each call is cheap; a wrong assumption is expensive.
 
-4. **Validate before committing** — if you are about to propose an architecture, tool, or approach,
-   search for past decisions on that topic first.
+4. **Validate before committing** — before proposing an architecture, tool, or approach, search
+   for past decisions on that topic first.
 
 ## Memory feedback
-After responding, if a memory was directly useful emit \`[mnemo:used:ID]\` once.
-If you discovered new evidence worth storing emit \`[mnemo:update:ID:one sentence]\`.
-ID = the 8-char prefix shown as \`id:XXXXXXXX\` at the end of each memory block above.
-These signals are invisible to the user. Only emit when genuinely applicable.
+After responding, emit these signals **at the very end of your reply** (invisible to the user):
+- \`[mnemo:used:XXXXXXXX]\` — if a memory was directly useful (use the **id:** prefix shown above)
+- \`[mnemo:update:XXXXXXXX:one sentence]\` — if you discovered new evidence worth adding to a memory
+Only emit when genuinely applicable. Never fabricate IDs.
 </system-reminder>`;
 
       return [wrapped];
