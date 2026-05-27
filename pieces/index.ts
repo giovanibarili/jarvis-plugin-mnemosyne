@@ -246,7 +246,7 @@ export function createPieces(ctx: PluginContext): Piece[] {
           text: `🧠 Mnemosyne — injected ${label}`,
           rendererKind: "mnemosyne-memory-injection",
           renderer: { plugin: "jarvis-plugin-mnemosyne", file: "MemoryInjectionEntry" },
-          payload: { count, query: lastMsg, sourceCounts, memories },
+          payload: { count, query: undefined, sourceCounts, memories },
         });
       }
 
@@ -506,7 +506,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // The renderer fetches POST /plugins/jarvis-plugin-mnemosyne/{forget,pin,consolidate}.
   // Without these the trash / pin buttons silently 404. We register thin
   // wrappers that share the same handlers as the assistant-facing tools.
-  registerHttpRoutes(ctx, store, consolidator, panel);
+  registerHttpRoutes(ctx, store, consolidator, panel, config);
 
   return {
     observer,
@@ -559,7 +559,8 @@ function registerHttpRoutes(
   ctx: PluginContext,
   store: MnemosyneStore,
   consolidator: ConsolidatorPiece,
-  panel: PanelPiece
+  panel: PanelPiece,
+  config: any,
 ): void {
   const base = "/plugins/jarvis-plugin-mnemosyne";
 
@@ -1181,6 +1182,10 @@ async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
     },
     model: config?.triage_v12?.model ?? "haiku",
     logger,
+    enrichCfg: {
+      enabled: config?.enrich_v12?.enabled ?? true,
+      model: config?.enrich_v12?.model ?? "haiku",
+    },
   });
 
   // RelatePiece — optional. Only wired when relate_v12.enabled !== false to

@@ -8,6 +8,7 @@ import { ClassifyV12 } from "./classify";
 import { CategoryGate, GateConfig } from "./category-gate";
 import { RelateJudge } from "./relate-judge";
 import { IntraTurnRelate, MemoryNode, IntraTurnEdge } from "./intra-turn-relate";
+import { EnrichV12 } from "./enrich";
 
 export interface EncodedMemory extends ClassifiedCandidate {
   id: string;
@@ -46,6 +47,8 @@ export interface EncoderV12Opts {
   intraTurnCfg: { maxPairs: number };
   model: string;
   logger?: Logger;
+  /** If provided, each draft is semantically enriched before being written to the store. */
+  enrichCfg?: { enabled: boolean; model: string };
 }
 
 export class EncoderV12 {
@@ -53,6 +56,7 @@ export class EncoderV12 {
   private readonly classify: ClassifyV12;
   private readonly gate: CategoryGate;
   private readonly intraTurn: IntraTurnRelate;
+  private readonly enricher: EnrichV12 | null;
 
   constructor(private readonly opts: EncoderV12Opts) {
     this.triage = new TriageV12(opts.llm, opts.promptPaths.triage, opts.model);
@@ -66,6 +70,9 @@ export class EncoderV12 {
     this.gate = new CategoryGate(opts.catalog, opts.pending, this.classify, opts.gateCfg);
     const judge = new RelateJudge(opts.llm, opts.promptPaths.relate, opts.model);
     this.intraTurn = new IntraTurnRelate(judge, opts.intraTurnCfg);
+    this.enricher = opts.enrichCfg?.enabled
+      ? new EnrichV12(opts.llm, opts.enrichCfg.model, opts.logger)
+      : null;
   }
 
   async process(
@@ -75,6 +82,11 @@ export class EncoderV12 {
     skipTriage?: boolean
   ): Promise<EncoderV12Result> {
     let triageCost = 0;
+    // Hoisted from the `else` block below so it remains in scope past the
+    // triage step. When skipTriage is true (caller already knows the content
+    // is worth extracting), we keep it undefined and downstream consumers
+    // use `triage?.reason ?? "caller_forced"`.
+    let triage: { reason: string; worth_extracting: boolean; costUsd?: number } | undefined;
 
     if (skipTriage) {
       // Triage skipped by caller — content is already known to be worth extracting.
@@ -88,7 +100,7 @@ export class EncoderV12 {
     } else {
       // Step 1: Triage
       onStep?.("triage");
-      const triage = await this.triage.evaluate(turn);
+      triage = await this.triage.evaluate(turn);
       triageCost = triage.costUsd ?? 0;
 
       if (!triage.worth_extracting) {
@@ -135,7 +147,7 @@ export class EncoderV12 {
           hint: "",
           extractor_template: "",
         };
-      const outcome = await this.gate.handle(proposal, cand, turn, triage.reason);
+      const outcome = await this.gate.handle(proposal, cand, turn, triage?.reason ?? "caller_forced");
       if (outcome.materialized) materializedSlugs.push(proposal.id);
       if (outcome.finalCandidate) finalCandidates.push(outcome.finalCandidate);
     }
@@ -169,13 +181,17 @@ export class EncoderV12 {
     const now = new Date().toISOString();
     const memories: EncodedMemory[] = [];
     for (const c of finalCandidates) {
-      const draft: EncodedMemory = {
+      let draft: EncodedMemory = {
         ...c,
         id: `${sessionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         session_id: sessionId,
         created_at: now,
         origin_source: "user",
       };
+      // Step 3a: Semantic enrichment — append domain synonyms before embedding
+      if (this.enricher) {
+        draft = await this.enricher.enrich(draft);
+      }
       const written = await this.opts.sink.write(draft);
       memories.push({ ...draft, id: written.id });
     }
