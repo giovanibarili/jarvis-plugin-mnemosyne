@@ -62,10 +62,19 @@ import type { Memory, FilterCategory, Category } from "./types";
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
 
+export interface SelectedEdge {
+  relation: string;
+  reason: string | null;
+  evidence: string | null;
+  fromTitle: string | null;
+  toTitle: string | null;
+}
+
 interface Props {
   memories: Memory[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  onSelectEdge: (edge: SelectedEdge | null) => void;
   /** Available project values for the filter (same list MnemosynePanel computes). */
   projects: string[];
 }
@@ -701,6 +710,34 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
       console.debug("[GraphTab] ClickNodeEvent", { visId: evt?.node?.id, props, resolved: id });
 
       if (id) onSelect(id);
+    });
+
+    viz.registerOnEvent(NeoVisEvents.ClickEdgeEvent, (evt: any) => {
+      const props = evt?.edge?.raw?.properties ?? evt?.edge?.properties ?? {};
+      const str = (v: any): string | null => {
+        if (v == null) return null;
+        if (typeof v === "object" && "low" in v) return String(v.low) || null;
+        return String(v) || null;
+      };
+      // Resolve endpoint titles from the graph nodes via vis-network
+      const net = visRef.current?.network as any;
+      const edgeId = evt?.edge?.id;
+      const connectedNodes = edgeId != null ? net?.getConnectedNodes?.(edgeId) : [];
+      const getNodeTitle = (visId: any): string | null => {
+        const nodeData = net?.body?.data?.nodes?.get?.(visId);
+        return nodeData?.label ?? null;
+      };
+      const fromTitle = connectedNodes?.[0] != null ? getNodeTitle(connectedNodes[0]) : null;
+      const toTitle   = connectedNodes?.[1] != null ? getNodeTitle(connectedNodes[1]) : null;
+      onSelectEdge({
+        relation: str(props.relation) ?? "relates to",
+        reason:   str(props.reason),
+        evidence: str(props.evidence),
+        fromTitle,
+        toTitle,
+      });
+      // Deselect memory node when edge is selected
+      onSelect(null);
     });
 
     viz.render();

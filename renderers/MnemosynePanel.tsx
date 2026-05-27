@@ -96,6 +96,7 @@ export default function MnemosynePanel({ state }: Props) {
   const [filterLayer, setFilterLayer] = useState<FilterLayer>("all");
   const [filterProject, setFilterProject] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<import('./GraphTab').SelectedEdge | null>(null);
   // Memory fetched on demand when clicked node is not in the preloaded list
   const [fetchedMemory, setFetchedMemory] = useState<Memory | null>(null);
   const [actionStatus, setActionStatus] = useState<string>("");
@@ -363,14 +364,59 @@ export default function MnemosynePanel({ state }: Props) {
           <GraphTab
             memories={memories}
             selectedId={selectedId}
-            onSelect={(id) => setSelectedId(id)}
+            onSelect={(id) => { setSelectedId(id); setSelectedEdge(null); }}
+            onSelectEdge={(edge) => { setSelectedEdge(edge); setSelectedId(null); }}
             projects={projects}
           />
         ) : (
           <PromptsTab />
         )}
 
-        {selected && activeTab !== "categories" ? (
+        {selectedEdge && activeTab === "graph" ? (
+          <div style={styles.detail}>
+            <div style={styles.detailHeader}>
+              <div style={styles.detailTitle}>
+                {selectedEdge.relation.replace(/_/g, " ")}
+              </div>
+              <button style={styles.closeBtn} onClick={() => setSelectedEdge(null)} title="Close">✕</button>
+            </div>
+            <div style={styles.detailMeta}>
+              <span style={{ ...styles.detailChip, color: (
+                selectedEdge.relation === "reinforces" ? "#10b981" :
+                selectedEdge.relation === "extends" ? "#3b82f6" :
+                selectedEdge.relation === "example-of" ? "#06b6d4" :
+                selectedEdge.relation === "depends-on" ? "#f59e0b" :
+                selectedEdge.relation === "contradicts" ? "#ef4444" :
+                selectedEdge.relation === "supersede" ? "#a855f7" :
+                "#9ca3af"
+              ), borderColor: "currentColor" }}>edge</span>
+            </div>
+            {selectedEdge.fromTitle || selectedEdge.toTitle ? (
+              <div style={{ padding: "0 12px 8px", fontSize: "11px", color: "#6b7280" }}>
+                <div style={{ marginBottom: "4px" }}>
+                  <span style={{ color: "#9ca3af" }}>from </span>
+                  <span style={{ color: "#d1d5db" }}>{selectedEdge.fromTitle ?? "—"}</span>
+                </div>
+                <div>
+                  <span style={{ color: "#9ca3af" }}>to </span>
+                  <span style={{ color: "#d1d5db" }}>{selectedEdge.toTitle ?? "—"}</span>
+                </div>
+              </div>
+            ) : null}
+            {selectedEdge.reason ? (
+              <div style={styles.detailEvidenceWrap}>
+                <div style={styles.detailLabel}>reason</div>
+                <pre style={styles.detailEvidence}>{selectedEdge.reason}</pre>
+              </div>
+            ) : null}
+            {selectedEdge.evidence ? (
+              <div style={styles.detailEvidenceWrap}>
+                <div style={styles.detailLabel}>evidence</div>
+                <pre style={styles.detailEvidence}>{selectedEdge.evidence}</pre>
+              </div>
+            ) : null}
+          </div>
+        ) : selected && activeTab !== "categories" ? (
           <div style={styles.detail}>
             <div style={styles.detailHeader}>
               <div style={styles.detailTitle}>{selected.title}</div>
