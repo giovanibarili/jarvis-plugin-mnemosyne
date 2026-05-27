@@ -683,6 +683,7 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
       if (cancelled) return;
       setLoading(false);
       setRecordCount(Number(evt?.recordCount ?? 0));
+      attachEdgeClick();
     });
     viz.registerOnEvent(NeoVisEvents.ErrorEvent, (evt: any) => {
       if (cancelled) return;
@@ -712,33 +713,41 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
       if (id) onSelect(id);
     });
 
-    viz.registerOnEvent(NeoVisEvents.ClickEdgeEvent, (evt: any) => {
-      const props = evt?.edge?.raw?.properties ?? evt?.edge?.properties ?? {};
-      const str = (v: any): string | null => {
-        if (v == null) return null;
-        if (typeof v === "object" && "low" in v) return String(v.low) || null;
-        return String(v) || null;
-      };
-      // Resolve endpoint titles from the graph nodes via vis-network
+    // NeoVis ClickEdgeEvent may not fire reliably — hook vis-network directly.
+    // We attach after viz.render() so the vis-network instance is available.
+    const attachEdgeClick = () => {
       const net = visRef.current?.network as any;
-      const edgeId = evt?.edge?.id;
-      const connectedNodes = edgeId != null ? net?.getConnectedNodes?.(edgeId) : [];
-      const getNodeTitle = (visId: any): string | null => {
-        const nodeData = net?.body?.data?.nodes?.get?.(visId);
-        return nodeData?.label ?? null;
-      };
-      const fromTitle = connectedNodes?.[0] != null ? getNodeTitle(connectedNodes[0]) : null;
-      const toTitle   = connectedNodes?.[1] != null ? getNodeTitle(connectedNodes[1]) : null;
-      onSelectEdge({
-        relation: str(props.relation) ?? "relates to",
-        reason:   str(props.reason),
-        evidence: str(props.evidence),
-        fromTitle,
-        toTitle,
+      if (!net) return;
+      net.on("click", (evt: any) => {
+        if (!evt.edges || evt.edges.length === 0) return;
+        if (evt.nodes && evt.nodes.length > 0) return; // node click takes priority
+        const edgeId = evt.edges[0];
+        const str = (v: any): string | null => {
+          if (v == null) return null;
+          if (typeof v === "object" && "low" in v) return String(v.low) || null;
+          return String(v) || null;
+        };
+        // Get edge properties from vis-network body
+        const edgeData = net?.body?.data?.edges?.get?.(edgeId);
+        const props = edgeData?.raw?.properties ?? edgeData?.properties ?? {};
+        // Resolve node titles
+        const connectedNodes = net?.getConnectedNodes?.(edgeId) ?? [];
+        const getNodeTitle = (visId: any): string | null => {
+          const nodeData = net?.body?.data?.nodes?.get?.(visId);
+          return nodeData?.label ?? null;
+        };
+        const fromTitle = connectedNodes[0] != null ? getNodeTitle(connectedNodes[0]) : null;
+        const toTitle   = connectedNodes[1] != null ? getNodeTitle(connectedNodes[1]) : null;
+        onSelectEdge({
+          relation: str(props.relation) ?? "relates to",
+          reason:   str(props.reason),
+          evidence: str(props.evidence),
+          fromTitle,
+          toTitle,
+        });
+        onSelect(null);
       });
-      // Deselect memory node when edge is selected
-      onSelect(null);
-    });
+    };
 
     viz.render();
 
