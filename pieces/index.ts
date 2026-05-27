@@ -254,56 +254,13 @@ export function createPieces(ctx: PluginContext): Piece[] {
       // context rather than user-authored content. Anthropic recognizes
       // this tag natively and adjusts tone accordingly — no risk of the
       // model citing memories verbatim or treating them as instructions.
+      // The system prompt (via gatedRetrieverPiece.systemContext) already contains
+      // the full Mnemosyne legend, format guide, and usage rules — permanently cached.
+      // The ephemeral block here carries ONLY the per-turn retrieved memories.
       const wrapped = `<system-reminder>
-The following memories were retrieved by Mnemosyne based on the current conversation context. Use them as background knowledge — past decisions, preferences, and patterns from previous sessions. Do not cite them verbatim unless directly relevant to the current task.
-
-### How to read this block
-
-Each memory entry has the format:
-
-\`\`\`
-[●|◦] [vector|graph]  [HIGH|MEDIUM|WEAK]  [category]  <title>
-  sim <cosine>  rerank <score>  ·  conf <confidence>  ·  reinf <reinforcements>
-  why: recency <r>  conf <c>  reinf <r>  graph <g>
-  matched on \`<terms>\`: <snippet>
-> <full memory content>
-⚠️ Conflicts with: <id-prefix>  (only when a conflict exists)
-  ↑ <title> — <relation-type>   (parent memories — broader context)
-  ↓ <title> — <relation-type>   (child memories — more specific detail)
-  id:<8-char-id>               ← USE THIS ID for memory_fetch / mnemo:used / mnemo:update
-\`\`\`
-
-Signal guide:
-- **● vector** = matched by semantic embedding; **◦ graph** = pulled by relation from a matched memory
-- **sim** = cosine similarity to query (negative = weak semantic overlap, pulled by graph or keyword)
-- **rerank** = final score after confidence × weight + reinforcements × weight + graph × weight
-- **conf** = extractor confidence when memory was created (0–1)
-- **reinf** = how many times this memory was reinforced by past retrievals
-- **↑ parent** = broader/more general context; **↓ child** = more specific sub-fact
-- **id:XXXXXXXX** = 8-char prefix — required for \`memory_fetch(id)\`, \`[mnemo:used:ID]\`, \`[mnemo:update:ID:...]\`
+The following memories were retrieved by Mnemosyne for this turn. Apply them as background context.
 
 ${block}
-
-## Thinking protocol — Mnemosyne-first
-During your internal reasoning (thinking phase), treat memory tools as your primary knowledge source:
-
-1. **Before assuming anything** about the user's preferences, stack, decisions, or past work —
-   call \`memory_search\` first. Training data is the last resort.
-
-2. **Follow leads** — the ↑/↓ relations above show the knowledge graph. Call \`memory_fetch(id)\`
-   on any entry whose **id:XXXXXXXX** looks relevant. The ID is at the bottom of each memory block.
-
-3. **Search multiple angles** — one search is rarely enough. Search by project, by pattern, by term.
-   Each call is cheap; a wrong assumption is expensive.
-
-4. **Validate before committing** — before proposing an architecture, tool, or approach, search
-   for past decisions on that topic first.
-
-## Memory feedback
-After responding, emit these signals **at the very end of your reply** (invisible to the user):
-- \`[mnemo:used:XXXXXXXX]\` — if a memory was directly useful (use the **id:** prefix shown above)
-- \`[mnemo:update:XXXXXXXX:one sentence]\` — if you discovered new evidence worth adding to a memory
-Only emit when genuinely applicable. Never fabricate IDs.
 </system-reminder>`;
 
       return [wrapped];
@@ -877,7 +834,55 @@ function gatedRetrieverPiece(
     async stop() {
       if (handle.real) await handle.real.stop();
     },
-    // Intentionally NO systemContext: memory injection moved to context injector.
+    // Static system prompt contribution — permanent, cached, never changes per turn.
+    // The per-turn memory block is injected separately via registerContextInjector
+    // (cache_control: ephemeral in the user message). This static block teaches the
+    // LLM how the Mnemosyne system works so it can use it correctly without relying
+    // on the per-turn legend (which adds tokens every turn).
+    systemContext: () => `## Mnemosyne — Long-term memory system
+
+You have access to a long-term memory system (Mnemosyne) that stores past decisions,
+preferences, patterns, and domain knowledge extracted from previous conversations.
+
+### How memory retrieval works
+
+On every turn, relevant memories are automatically retrieved and injected into your context
+as a \`<system-reminder>\` block prepended to the user message. You do NOT need to search
+for them — they arrive automatically. However, you can always call \`memory_search\` to
+find additional memories not surfaced automatically.
+
+### Memory block format
+
+Each injected memory entry looks like:
+
+\`\`\`
+[●|◦] [vector|graph]  [HIGH|MEDIUM|WEAK]  [category]  <title>
+  sim <cosine>  rerank <score>  ·  conf <confidence>  ·  reinf <reinforcements>
+> <full memory content>
+  ↑ <parent title> — <relation>   (broader context)
+  ↓ <child title>  — <relation>   (more specific detail)
+  id:<8-char-id>                  ← USE THIS to call memory_fetch(id)
+\`\`\`
+
+Signal guide:
+- **● vector** = semantically matched; **◦ graph** = pulled by graph relation from a matched memory
+- **sim** = cosine similarity to query. Negative = weak semantic match (graph/keyword pull)
+- **rerank** = final ranking score (confidence × weight + reinforcements × weight + graph × weight)
+- **conf** = extractor confidence when the memory was created (0–1)
+- **reinf** = times this memory was reinforced by past retrievals (higher = historically relevant)
+- **↑ parent** = broader/more general memory; **↓ child** = more specific sub-fact
+- **id:XXXXXXXX** = 8-char prefix required for \`memory_fetch(id)\`, \`[mnemo:used:ID]\`, \`[mnemo:update:ID:...]\`
+
+### Rules for using memory
+
+1. **Apply automatically** — when injected memories are relevant, use them without being asked.
+2. **Follow leads** — call \`memory_fetch(id)\` on any ↑/↓ relation that seems relevant. The ID is the \`id:\` at the bottom of each entry.
+3. **Search when uncertain** — call \`memory_search\` before assuming anything about the user's preferences, stack, or past decisions.
+4. **Emit feedback** at the very end of your reply (invisible to the user):
+   - \`[mnemo:used:XXXXXXXX]\` — if a memory was directly useful
+   - \`[mnemo:update:XXXXXXXX:one sentence]\` — if you discovered new evidence worth adding
+   - **Never fabricate IDs.** Only use the \`id:\` values shown in injected memory entries.
+`,
   };
 }
 
