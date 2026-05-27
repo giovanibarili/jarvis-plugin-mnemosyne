@@ -374,7 +374,14 @@ export class RetrieverPiece {
       const vectorSim = 1 - ch.distance;
       // Apply the threshold BEFORE hydrating from markdown — saves I/O on
       // hits we'll discard anyway.
-      if (vectorSim < minSim) { droppedSim++; continue; }
+      // NOTE: chromadb with MiniLM can return distance > 1.0 for very short
+      // queries (2-3 words), producing vectorSim < 0. We log but do NOT drop —
+      // the reranker will still rank these hits by recency/reinforcements.
+      if (vectorSim < minSim) {
+        log.debug({ sessionId, id: ch.id, distance: ch.distance, vectorSim, minSim }, "mnemosyne: retrieve — drop by sim");
+        droppedSim++;
+        continue;
+      }
       const mem = await this.store.markdownStore.read(ch.id);
       if (!mem) { droppedMem++; continue; }
       if (mem.visibility === "private" && mem.source_session !== sessionId) { droppedPrivacy++; continue; }

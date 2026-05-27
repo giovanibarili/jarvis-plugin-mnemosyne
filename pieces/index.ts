@@ -449,7 +449,11 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     workflowLookupEnabled: config.retriever.workflow_lookup_enabled,
     // New since 0.5.x — drops "more-orthogonal-than-aligned" hits before
     // they pollute context. Default 0.0; tune via config to be stricter.
-    minVectorSim: config.retriever.min_vector_sim ?? 0.0,
+    // Default -1.0 (floor of cosine space) — chromadb with MiniLM can return
+    // distance > 1.0 for very short queries (2-3 words), producing vectorSim < 0.
+    // Setting 0.0 would silently drop all hits for short queries. The reranker
+    // handles quality filtering; we keep sim threshold as a last-resort noise gate.
+    minVectorSim: config.retriever.min_vector_sim ?? -1.0,
     // v1.3 — graph neighborhood injection. Disabled by default; enable via config.
     graphRetrieval: config.graph_retrieval?.enabled
       ? {
