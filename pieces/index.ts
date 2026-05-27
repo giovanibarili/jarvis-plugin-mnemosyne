@@ -151,6 +151,14 @@ export function createPieces(ctx: PluginContext): Piece[] {
         return [];
       }
 
+      // The ai.request subscriber (lastUserMsg.set) and this injector both run
+      // from the same bus.publish("ai.request") call. Subscribers execute in
+      // registration order — if JarvisCore registered before Mnemosyne, our
+      // subscriber runs AFTER handlePrompt→sendAndStream→contextInjector.
+      // A single setImmediate yields to the next I/O tick, giving the subscriber
+      // time to fire and set lastUserMsg before we query it.
+      await new Promise<void>((r) => setImmediate(r));
+
       const block = await ready.systemContext(sessionId);
       ready.recordInjection(!!block);
       log.info({ sessionId, blockLen: block?.length ?? 0 }, "mnemosyne: injector — systemContext done");
