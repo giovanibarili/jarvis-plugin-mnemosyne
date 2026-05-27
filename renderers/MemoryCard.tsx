@@ -81,6 +81,23 @@ export default function MemoryCard({ memory, selected, onSelect, onPin, onDelete
             </span>
           ) : null}
           {promoted ? <span style={styles.layerBadge}>long</span> : <span style={styles.layerBadgeShort}>short</span>}
+          {(memory as any)._score !== undefined ? (
+            <span
+              style={styles.scoreBadge}
+              title={
+                (memory as any)._scoreBreakdown
+                  ? `sim: ${(memory as any)._vectorSim}  rerank: ${(memory as any)._score}\nrecency: ${(memory as any)._scoreBreakdown.recency}  conf: ${(memory as any)._scoreBreakdown.confidence}\nreinf: ${(memory as any)._scoreBreakdown.reinforcements}  graph: ${(memory as any)._scoreBreakdown.graph_distance}`
+                  : `score: ${(memory as any)._score}`
+              }
+            >
+              ↑{(memory as any)._score}
+            </span>
+          ) : null}
+          {(memory as any)._vectorSim !== undefined && (memory as any)._score === undefined ? (
+            <span style={styles.simBadge} title={`vector sim: ${(memory as any)._vectorSim}`}>
+              ~{(memory as any)._vectorSim}
+            </span>
+          ) : null}
           <div style={styles.actions} onClick={stop}>
             <button
               style={pinned ? { ...styles.iconBtn, color: "#fbbf24" } : styles.iconBtn}
@@ -187,6 +204,24 @@ const styles: Record<string, any> = {
     padding: "0 6px",
     borderRadius: "8px",
     textTransform: "uppercase",
+  },
+  scoreBadge: {
+    fontSize: "10px",
+    color: "#f59e0b",
+    border: "1px solid #f59e0b",
+    padding: "0 5px",
+    borderRadius: "8px",
+    fontFamily: "monospace",
+    cursor: "help",
+  },
+  simBadge: {
+    fontSize: "10px",
+    color: "#6b7280",
+    border: "1px solid #374151",
+    padding: "0 5px",
+    borderRadius: "8px",
+    fontFamily: "monospace",
+    cursor: "help",
   },
   conflictBadge: {
     fontSize: "10px",

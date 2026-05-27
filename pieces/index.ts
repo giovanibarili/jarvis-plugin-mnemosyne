@@ -495,6 +495,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     consolidator,
     replayEngine,
     encoder,
+    reranker,
     config.retriever.rerank_weights,
     config,
     relatePieceRef,
@@ -705,16 +706,44 @@ function registerHttpRoutes(
 
       // 2. Hydrate + dedup
       const seen = new Set<string>();
-      const memories: any[] = [];
+      const hydrated: Array<{ mem: any; vectorSim: number }> = [];
       for (const hit of allHits) {
         if (seen.has(hit.id)) continue;
         seen.add(hit.id);
         const mem = await store.markdownStore.read(hit.id).catch(() => null);
         if (!mem) continue;
-        memories.push({ ...mem, _vectorSim: 1 - hit.distance });
+        hydrated.push({ mem, vectorSim: 1 - hit.distance });
       }
 
-      // 3. 1-hop graph expansion
+      // 3. Rerank — same weights as the retriever pipeline
+      let memories: any[];
+      if (hydrated.length > 0) {
+        const rerankHits = hydrated.map(({ mem, vectorSim }) => ({
+          memory: mem,
+          score: vectorSim,
+          source: "vector" as const,
+          vectorSim,
+        }));
+        const sorted = reranker.rerank(rerankHits);
+        memories = sorted.map((h) => {
+          const bd = h.scoreBreakdown;
+          return {
+            ...h.memory,
+            _vectorSim: parseFloat((h.vectorSim ?? 0).toFixed(3)),
+            _score: parseFloat(h.score.toFixed(3)),
+            _scoreBreakdown: bd ? {
+              recency: parseFloat(bd.recency.toFixed(3)),
+              confidence: parseFloat(bd.confidence.toFixed(3)),
+              reinforcements: parseFloat(bd.reinforcements.toFixed(3)),
+              graph_distance: parseFloat(bd.graphDistance.toFixed(3)),
+            } : undefined,
+          };
+        });
+      } else {
+        memories = [];
+      }
+
+      // 4. 1-hop graph expansion
       const seedIds = memories.map((m) => m.id);
       let neighborIds: string[] = [];
       if (seedIds.length > 0) {
@@ -722,7 +751,6 @@ function registerHttpRoutes(
         neighborIds = neighbors
           .filter((n: any) => !seen.has(n.id))
           .map((n: any) => n.id);
-        // Add neighbor IDs to seen (don't push full objects — caller gets IDs)
         neighborIds.forEach((id: string) => seen.add(id));
       }
 
@@ -984,6 +1012,7 @@ function registerTools(
   consolidator: ConsolidatorPiece,
   replay: ReplayEngine,
   encoder: EncoderPiece,
+  reranker: Reranker,
   rerankWeights: RerankWeights,
   config: any,
   relatePieceRef?: { current?: import("./relate.js").RelatePiece },
