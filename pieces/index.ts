@@ -280,10 +280,10 @@ ${block}
 During your internal reasoning (thinking phase), treat memory tools as your primary knowledge source:
 
 1. **Before assuming anything** about the user's preferences, stack, decisions, or past work —
-   call `memory_search` first. Training data is the last resort.
+   call \`memory_search\` first. Training data is the last resort.
 
 2. **Follow leads** — if the injection above shows relations (↑ parents, ↓ children), call
-   `memory_fetch(id)` on relevant ones during thinking to explore the knowledge graph.
+   \`memory_fetch(id)\` on relevant ones during thinking to explore the knowledge graph.
 
 3. **Search multiple angles** — one search is rarely enough. Search by project, by pattern type,
    by specific technology. Each search is cheap; assumptions are expensive.
@@ -292,9 +292,9 @@ During your internal reasoning (thinking phase), treat memory tools as your prim
    search for past decisions on that topic first.
 
 ## Memory feedback
-After responding, if a memory was directly useful emit `[mnemo:used:ID]` once.
-If you discovered new evidence worth storing emit `[mnemo:update:ID:one sentence]`.
-ID = the 8-char prefix shown as `id:XXXXXXXX` at the end of each memory block above.
+After responding, if a memory was directly useful emit \`[mnemo:used:ID]\` once.
+If you discovered new evidence worth storing emit \`[mnemo:update:ID:one sentence]\`.
+ID = the 8-char prefix shown as \`id:XXXXXXXX\` at the end of each memory block above.
 These signals are invisible to the user. Only emit when genuinely applicable.
 </system-reminder>`;
 
@@ -1210,7 +1210,9 @@ async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
           edge.from,
           edge.to,
           edge.relation,
-          edge.confidence
+          edge.confidence,
+          edge.reason,
+          (edge as any).evidence,
         );
       },
       cfg: {
