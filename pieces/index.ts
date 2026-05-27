@@ -882,7 +882,7 @@ Signal guide:
 1. **Apply automatically** — when injected memories are relevant, use them without being asked.
 2. **Follow leads** — call \`memory_fetch(id)\` on any ↑/↓ relation that seems relevant. The ID is the \`id:\` at the bottom of each entry.
 3. **Search when uncertain** — call \`memory_search\` before assuming anything about the user's preferences, stack, or past decisions.
-4. **Give feedback via tools** — use the dedicated tools, not inline text signals:\n   - \`memory_reinforce(id)\` — if a memory was directly useful in your answer\n   - \`memory_add_evidence(id, evidence)\` — if you discovered new evidence worth adding to a memory\n   - Pass the **full id** shown as \`id:\` at the bottom of each memory entry.
+4. **[MUST] Give feedback via tools after responding** — MANDATORY, call for every useful memory:\n   - \`memory_reinforce(id)\` — MUST call for every memory that was directly useful\n   - \`memory_add_evidence(id, evidence)\` — if you discovered new evidence worth adding to a memory\n   - Pass the **full id** shown as \`id:\` at the bottom of each memory entry.
 `,
   };
 }
