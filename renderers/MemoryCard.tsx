@@ -82,20 +82,23 @@ export default function MemoryCard({ memory, selected, onSelect, onPin, onDelete
           ) : null}
           {promoted ? <span style={styles.layerBadge}>long</span> : <span style={styles.layerBadgeShort}>short</span>}
           {(memory as any)._score !== undefined ? (
-            <span
-              style={styles.scoreBadge}
-              title={
-                (memory as any)._scoreBreakdown
-                  ? `sim: ${(memory as any)._vectorSim}  rerank: ${(memory as any)._score}\nrecency: ${(memory as any)._scoreBreakdown.recency}  conf: ${(memory as any)._scoreBreakdown.confidence}\nreinf: ${(memory as any)._scoreBreakdown.reinforcements}  graph: ${(memory as any)._scoreBreakdown.graph_distance}`
-                  : `score: ${(memory as any)._score}`
-              }
-            >
-              ↑{(memory as any)._score}
-            </span>
-          ) : null}
-          {(memory as any)._vectorSim !== undefined && (memory as any)._score === undefined ? (
-            <span style={styles.simBadge} title={`vector sim: ${(memory as any)._vectorSim}`}>
-              ~{(memory as any)._vectorSim}
+            <span style={styles.scoreGroup}>
+              <span style={styles.scoreItem} title="vector similarity (MiniLM)">
+                sim <b>{(memory as any)._vectorSim}</b>
+              </span>
+              <span style={{ ...styles.scoreItem, color: "#f59e0b" }} title="rerank score (final)">
+                &#8593;<b>{(memory as any)._score}</b>
+              </span>
+              {(memory as any)._scoreBreakdown ? (
+                <>
+                  <span style={styles.scoreItem} title="extractor confidence">
+                    conf <b>{(memory as any)._scoreBreakdown.confidence}</b>
+                  </span>
+                  <span style={styles.scoreItem} title="reinforcement count (normalized)">
+                    reinf <b>{(memory as any)._scoreBreakdown.reinforcements}</b>
+                  </span>
+                </>
+              ) : null}
             </span>
           ) : null}
           <div style={styles.actions} onClick={stop}>
@@ -205,23 +208,18 @@ const styles: Record<string, any> = {
     borderRadius: "8px",
     textTransform: "uppercase",
   },
-  scoreBadge: {
-    fontSize: "10px",
-    color: "#f59e0b",
-    border: "1px solid #f59e0b",
-    padding: "0 5px",
-    borderRadius: "8px",
-    fontFamily: "monospace",
-    cursor: "help",
+  scoreGroup: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    marginRight: "4px",
   },
-  simBadge: {
+  scoreItem: {
     fontSize: "10px",
     color: "#6b7280",
-    border: "1px solid #374151",
-    padding: "0 5px",
-    borderRadius: "8px",
     fontFamily: "monospace",
-    cursor: "help",
+    whiteSpace: "nowrap" as const,
+    cursor: "default",
   },
   conflictBadge: {
     fontSize: "10px",
