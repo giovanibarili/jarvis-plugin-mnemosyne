@@ -123,11 +123,11 @@ response with the most relevant context.
 ```
 ai.request received
   → Retriever subscriber: lastUserMsg[sid] = text
-                          pendingFetch[sid]  = systemContext(sid)   ← async DB fetch starts
+                          lastUserMsg[sid]   = text                 ← query gravada
 
 sendAndStream called
   → await contextInjector(sid)
-      → injector awaits pendingFetch[sid] with 800ms safety timeout
+      → injector chama systemContext(sid) diretamente (async)
       → cache populated → returns [<system-reminder>…</system-reminder>]
   → memoryBlock prepended to user message as ephemeral block
   → API call
@@ -139,7 +139,7 @@ already has it in context from the previous turn). Re-injection happens when mem
 or after compaction (which wipes context history).
 
 **Actor sessions:** `actor-runner` publishes `ai.request` before calling `sendAndStream` so
-the retriever's subscriber primes `pendingFetch` before the injector runs.
+o injector chama `systemContext` diretamente — KISS, sem pre-fetch.
 
 **Core changes required:** `ContextInjectorFn` in `@jarvis/core` returns
 `Promise<string[]>`, `sendAndStream` awaits it, and the PluginManager aggregator uses
@@ -295,7 +295,7 @@ Full version sequencing planned:
 | Version | Focus |
 |---|---|
 | **v1.0** | Full-stack MVP — extract, store, retrieve, consolidate, replay |
-| **v1.1 (current)** | Sync first-turn injection — pendingFetch pattern, async `ContextInjectorFn`, dedup by block hash, compaction reset. Multilingual encoding, origin tracking, injection dedup, query enrichment. |
+| **v1.1 (current)** | KISS injection — `systemContext` chamado diretamente pelo injector, sem `pendingFetch`. Async `ContextInjectorFn`, dedup by block hash, compaction reset. Multilingual encoding, origin tracking, injection dedup, query enrichment. |
 | v1.2 | Anti-hallucination layer — provenance, citation enforcement |
 | v1.3 | Query intelligence — semantic query rewrite, intent classification |
 | v1.4 | Adaptive retrieval — learned rerank weights per query class |

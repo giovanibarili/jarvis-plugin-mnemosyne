@@ -1,5 +1,6 @@
 import type { PluginContext, Piece } from "@jarvis/core";
 import { EventBus } from "@jarvis/core";
+import { log, setPluginLogger } from "../lib/log.js";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { promises as fs } from "fs";
@@ -75,6 +76,11 @@ const DATA_DIR = `${process.env.HOME}/.jarvis/mnemosyne`;
  * awaits before becoming functional.
  */
 export function createPieces(ctx: PluginContext): Piece[] {
+  // Wire the core logger into the Mnemosyne singleton FIRST — before any
+  // module uses `log`. ctx.log is a child of the core pino logger with
+  // { plugin: "jarvis-plugin-mnemosyne" } bound, so entries land in jarvis.log.
+  if (ctx.log) setPluginLogger(ctx.log);
+
   // Shared handle so `createPieces` can register the context injector before
   // bootstrap resolves, while still letting `gatedRetrieverPiece` populate
   // `real` once bootstrap completes. The injector is registered eagerly with
@@ -139,46 +145,15 @@ export function createPieces(ctx: PluginContext): Piece[] {
     ctx.registerContextInjector(async (sessionId: string): Promise<string[]> => {
       if (SESSION_EXCLUDE.test(sessionId)) return []; // skip ephemeral workers
       const ready = retrieverHandle.real;
-      if (!ready) return []; // bootstrap not done yet — opt out
-
-      type Cache = Map<string, { lastUserMsg: string; block: string }>;
-      type LastMsg = Map<string, string>;
-      type PendingMap = Map<string, Promise<string>>;
-      const cache = (ready as unknown as { cache: Cache }).cache;
-      const lastMsgMap = (ready as unknown as { lastUserMsg: LastMsg }).lastUserMsg;
-      const pendingMap = (ready as unknown as { pendingFetch: PendingMap }).pendingFetch;
-      const lastMsg = lastMsgMap.get(sessionId);
-
-      // No user message observed yet on this session — nothing to retrieve.
-      if (!lastMsg) return [];
-
-      const cached = cache.get(sessionId);
-
-      // If there's an in-flight fetch for this session (kicked off by the
-      // ai.request subscriber), await it with a 800ms safety timeout so
-      // we inject fresh data on the SAME turn rather than always lagging.
-      if (cached?.lastUserMsg !== lastMsg) {
-        const pending = pendingMap.get(sessionId);
-        if (pending) {
-          try {
-            await Promise.race([
-              pending,
-              new Promise<void>((_, rej) => setTimeout(() => rej(new Error("timeout")), 800)),
-            ]);
-          } catch {
-            // Timeout or error — fall through to whatever cache has now
-          }
-        }
+      log.debug({ sessionId, ready: !!ready }, "mnemosyne: injector called");
+      if (!ready) {
+        log.warn({ sessionId }, "mnemosyne: injector — bootstrap not ready");
+        return [];
       }
 
-      // Re-read cache after potential await
-      const freshCached = cache.get(sessionId);
-      const block = freshCached?.block ?? "";
-      // Record every injection attempt so the HUD can show success rate.
-      // We count both empty (no block) and successful injections, so the
-      // ratio injectionsWithBlock/injections gives the "useful injection"
-      // gauge directly.
+      const block = await ready.systemContext(sessionId);
       ready.recordInjection(!!block);
+      log.info({ sessionId, blockLen: block?.length ?? 0 }, "mnemosyne: injector — systemContext done");
       if (!block) return [];
 
       // Skip injection if the block is identical to what was last injected for

@@ -5,6 +5,7 @@ import type { RetrievalHit, MemoryNeighborhood } from "../lib/types";
 import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
 import { computeMatchSnippet } from "../lib/match-snippet.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
+import { log } from "../lib/log.js";
 
 /**
  * Render the parent/child neighborhood of a single memory as a short,
@@ -136,7 +137,7 @@ export class RetrieverPiece {
   //   lastUserMsg:   most recent user prompt observed on ai.request
   //   recentTurns:   ring buffer of last N {user, assistant} pairs for query enrichment
   //   cache:         formatted block keyed by the user message that produced it
-  //   pendingFetch:  in-flight systemContext() Promise for the current turn —
+  //
   //                  the injector awaits this with a timeout so it always gets
   //                  fresh data on the same turn the ai.request arrived.
   private lastUserMsg = new Map<string, string>();
@@ -144,7 +145,7 @@ export class RetrieverPiece {
   private readonly QUERY_CONTEXT_TURNS = 5;
   private cache = new Map<string, { lastUserMsg: string; block: string }>();
   /** In-flight fetch per session — awaited by the injector with timeout. */
-  pendingFetch = new Map<string, Promise<string>>();
+
   /** Last retrieval hits per session — read by the context injector for timeline payload. */
   lastHits = new Map<string, RetrievalHit[]>();
 
@@ -242,19 +243,7 @@ export class RetrieverPiece {
       // etc.) — they are not user queries and produce misleading retrieval.
       if (text.startsWith("[SYSTEM]") || text.startsWith("<system")) return;
       this.lastUserMsg.set(sid, text);
-
-      // Kick off retrieval immediately on ai.request so the cache is warm
-      // by the time sendAndStream calls contextInjector. The injector reads
-      // pendingFetch[sid] and awaits it (with timeout) — no more turn-1 miss.
-      const cached = this.cache.get(sid);
-      if (cached?.lastUserMsg !== text) {
-        const p = this.systemContext(sid);
-        this.pendingFetch.set(sid, p);
-        p.finally(() => {
-          // Only clear if this is still the active pending fetch for this sid.
-          if (this.pendingFetch.get(sid) === p) this.pendingFetch.delete(sid);
-        });
-      }
+      log.debug({ sid, textPreview: text.slice(0, 60) }, "mnemosyne: retriever — lastUserMsg set");
     });
   }
 
@@ -295,19 +284,23 @@ export class RetrieverPiece {
   async systemContext(sessionId?: string): Promise<string> {
     const sid = sessionId ?? "main";
     const lastMsg = this.lastUserMsg.get(sid);
+    log.debug({ sid, hasLastMsg: !!lastMsg }, "mnemosyne: retriever.systemContext called");
     if (!lastMsg) return "";
 
     const cached = this.cache.get(sid);
     if (cached?.lastUserMsg === lastMsg) {
       this._stats.cacheHits++;
+      log.debug({ sid }, "mnemosyne: retriever — cache hit");
       return cached.block;
     }
 
     this._stats.retrievals++;
     const query = this.buildQuery(sid);
+    log.debug({ sid, queryLen: query.length, queryPreview: query.slice(0, 80) }, "mnemosyne: retriever — querying");
     const { hits, workflowHits } = await this.retrieve(query, sid);
     this._stats.hitsTotal += hits.length;
     if (hits.length > 0) this._stats.retrievalsWithHits++;
+    log.info({ sid, hits: hits.length, workflowHits: workflowHits.length }, "mnemosyne: retriever — retrieved");
 
     const block = this.format(hits, workflowHits);
     this.cache.set(sid, { lastUserMsg: lastMsg, block });
@@ -330,7 +323,7 @@ export class RetrieverPiece {
     // this co-retrieval signal. Fire-and-forget: never blocks the injector.
     if (this.relationLinker && hits.length >= 2) {
       this.linkCoRetrievedMemories(hits).catch((err) => {
-        console.error("[mnemosyne] co-retrieval relation linking failed:", err);
+        log.error({ err: String(err) }, "mnemosyne: co-retrieval relation linking failed");
       });
     }
 
@@ -358,10 +351,12 @@ export class RetrieverPiece {
     query: string,
     sessionId: string,
   ): Promise<{ hits: RetrievalHit[]; workflowHits: string[] }> {
+    log.debug({ sessionId, step: "vector-query", topK: this.opts.topK }, "mnemosyne: retrieve start");
     // 1. Vector top-K from short + long
     const shortHits = await this.store.chroma.query("short", query, this.opts.topK);
     const longHits = await this.store.chroma.query("long", query, this.opts.topK);
     const allChromaHits = [...shortHits, ...longHits];
+    log.debug({ sessionId, shortHits: shortHits.length, longHits: longHits.length }, "mnemosyne: retrieve — chroma done");
 
     // 2. Hydrate Memory objects from canonical markdown store, applying
     //    privacy filter: visibility="open" OR same session.
@@ -405,9 +400,11 @@ export class RetrieverPiece {
     //    vector-only retrieval. The conversation still works, just without
     //    relation-based context expansion.
     const seedIds = memories.map((m) => m.memory.id);
+    log.debug({ sessionId, seedIds: seedIds.length, graphDegraded: this.store.isGraphDegraded() }, "mnemosyne: retrieve — graph expand");
     if (seedIds.length > 0 && !this.store.isGraphDegraded()) {
       try {
         const neighbors = await this.store.neo4j.oneHopNeighbors(seedIds);
+        log.debug({ sessionId, neighbors: neighbors.length }, "mnemosyne: retrieve — graph neighbors done");
         for (const n of neighbors) {
           if (seen.has(n.id)) continue;
           if (n.visibility === "private" && n.source_session !== sessionId) continue;
@@ -420,7 +417,7 @@ export class RetrieverPiece {
           });
         }
       } catch (err) {
-        console.error("[mnemosyne] oneHopNeighbors failed, continuing vector-only:", err);
+        log.error({ sessionId, err: String(err) }, "mnemosyne: oneHopNeighbors failed — vector-only");
       }
     }
 
@@ -445,6 +442,7 @@ export class RetrieverPiece {
     //    than "most-reinforced first".
     const reranked = this.reranker.rerank(memories);
     const top = reranked.slice(0, this.opts.topK);
+    log.info({ sessionId, beforeRerank: memories.length, afterRerank: top.length }, "mnemosyne: retrieve — rerank done");
 
     // 6. v1.3 — attach graph neighborhood (parents + children) to each
     //    surviving hit. Best-effort: a Neo4j hiccup must not break retrieval.
@@ -452,7 +450,7 @@ export class RetrieverPiece {
       try {
         await this.enrichHits(top);
       } catch (err) {
-        console.error("[mnemosyne] graph enrichment failed:", err);
+        log.error({ err: String(err) }, "mnemosyne: graph enrichment failed");
       }
     }
 
@@ -534,7 +532,7 @@ export class RetrieverPiece {
       if (!id) continue;
       try {
         await this.store.incrementReinforcements(id);
-        console.debug(`[mnemosyne] feedback:used reinforced ${id}`);
+        log.debug({ id }, "mnemosyne: feedback:used reinforced");
       } catch { /* swallow */ }
     }
 
@@ -551,7 +549,7 @@ export class RetrieverPiece {
         if (existing.includes(newEvidence)) continue;
         const updated = { ...mem, evidence: existing ? `${existing}\n${newEvidence}` : newEvidence };
         await this.store.write(updated);
-        console.debug(`[mnemosyne] feedback:update enriched ${id}`);
+        log.debug({ id }, "mnemosyne: feedback:update enriched");
       } catch { /* swallow */ }
     }
   }
