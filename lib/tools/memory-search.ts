@@ -296,13 +296,11 @@ export function buildMemoryListTool(store: MnemosyneStore): CapabilityDefinition
 export function computeScoreBreakdown(
   memory: Memory,
   weights: {
-    recency: number;
     confidence: number;
     reinforcements: number;
     graph_distance: number;
   },
   source: "vector" | "graph" | "workflow_lookup" = "vector",
-  now: number = Date.now()
 ): {
   recency: number;
   confidence: number;
@@ -310,23 +308,20 @@ export function computeScoreBreakdown(
   graphDistance: number;
   total: number;
 } {
-  const ageDays = (now - memory.last_accessed) / (1000 * 60 * 60 * 24);
-  const recency = Math.exp(-ageDays / 30);
   const confidence = memory.confidence;
   const reinforcements = Math.min(memory.reinforcements / 10, 1);
   const graphDistance = source === "graph" ? 0.5 : 1.0;
   const total =
-    recency * weights.recency +
     confidence * weights.confidence +
     reinforcements * weights.reinforcements +
     graphDistance * weights.graph_distance;
-  return { recency, confidence, reinforcements, graphDistance, total };
+  // recency kept as 0 for backward compat with breakdown display shape
+  return { recency: 0, confidence, reinforcements, graphDistance, total };
 }
 
 export function buildMemoryExplainTool(
   store: MnemosyneStore,
   weights: {
-    recency: number;
     confidence: number;
     reinforcements: number;
     graph_distance: number;
