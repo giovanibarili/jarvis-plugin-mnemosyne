@@ -719,8 +719,9 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
       const net = visRef.current?.network as any;
       if (!net) return;
       net.on("click", (evt: any) => {
+        // Edge takes priority: if edges array is non-empty, open edge panel.
+        // (vis-network may also populate evt.nodes when clicking near a node.)
         if (!evt.edges || evt.edges.length === 0) return;
-        if (evt.nodes && evt.nodes.length > 0) return; // node click takes priority
         const edgeId = evt.edges[0];
         const str = (v: any): string | null => {
           if (v == null) return null;
