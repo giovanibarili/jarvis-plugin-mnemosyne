@@ -2,6 +2,7 @@ import type { CapabilityDefinition } from "@jarvis/core";
 import type { MnemosyneStore } from "../store.js";
 import type { Memory, Category } from "../types.js";
 import type { ListFilter, Layer } from "../markdown-store.js";
+import type { Reranker } from "../reranker.js";
 
 /**
  * Resolve an id parameter — supports full uuid or unique short prefix
@@ -59,7 +60,7 @@ interface MemoryExplainArgs {
 
 /* -------------------------------------------------------------- builders -- */
 
-export function buildMemorySearchTool(store: MnemosyneStore): CapabilityDefinition {
+export function buildMemorySearchTool(store: MnemosyneStore, reranker?: Reranker): CapabilityDefinition {
   return {
     name: "memory_search",
     description: [
@@ -161,24 +162,56 @@ export function buildMemorySearchTool(store: MnemosyneStore): CapabilityDefiniti
         .sort((a, b) => a.distance - b.distance)
         .slice(0, k);
 
-      const results = [];
+      // Hydrate memories and optionally apply reranker for richer scores.
+      const hits: Array<{ mem: Memory; vectorSim: number; layer: string }> = [];
       for (const h of ranked) {
         const mem = await store.markdownStore.read(h.id);
         if (!mem) continue;
-        results.push({
+        hits.push({ mem, vectorSim: 1 - h.distance, layer: h.layer });
+      }
+
+      // Apply reranker if available — overwrites score with weighted total
+      // and produces a scoreBreakdown. Falls back to vectorSim-only order.
+      let reranked = hits;
+      let breakdowns: Map<string, { recency: number; confidence: number; reinforcements: number; graphDistance: number; total: number }> | undefined;
+      if (reranker && hits.length > 0) {
+        const rerankHits = hits.map((h) => ({
+          memory: h.mem,
+          score: h.vectorSim,
+          source: "vector" as const,
+          vectorSim: h.vectorSim,
+        }));
+        const sorted = reranker.rerank(rerankHits);
+        breakdowns = new Map(sorted.map((h) => [h.memory.id, h.scoreBreakdown!]));
+        reranked = sorted.map((h) => ({ mem: h.memory, vectorSim: h.vectorSim ?? 0, layer: hits.find((x) => x.mem.id === h.memory.id)?.layer ?? "unknown" }));
+      }
+
+      const results = reranked.map(({ mem, vectorSim, layer }) => {
+        const bd = breakdowns?.get(mem.id);
+        return {
           id: mem.id,
           title: mem.title,
           content: mem.content,
           category: mem.category,
           project: mem.project,
-          layer: h.layer,
-          score: 1 - h.distance,
+          layer,
+          // sim = raw vector similarity; score = rerank total (or sim if no reranker)
+          sim: parseFloat(vectorSim.toFixed(3)),
+          score: bd ? parseFloat(bd.total.toFixed(3)) : parseFloat(vectorSim.toFixed(3)),
+          ...(bd ? {
+            score_breakdown: {
+              recency: parseFloat(bd.recency.toFixed(3)),
+              confidence: parseFloat(bd.confidence.toFixed(3)),
+              reinforcements: parseFloat(bd.reinforcements.toFixed(3)),
+              graph_distance: parseFloat(bd.graphDistance.toFixed(3)),
+            },
+          } : {}),
           last_accessed: mem.last_accessed,
           confidence: mem.confidence,
           reinforcements: mem.reinforcements,
           pinned: mem.pinned,
-        });
-      }
+        };
+      });
       return { results };
     },
   };

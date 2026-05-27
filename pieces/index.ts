@@ -992,7 +992,7 @@ function registerTools(
   const reg = ctx.capabilityRegistry;
 
   // Memory — search & inspection (vector-backed, work without graph)
-  reg.register(buildMemorySearchTool(store));
+  reg.register(buildMemorySearchTool(store, reranker));
   reg.register(buildMemoryGetTool(store));
   reg.register(buildMemoryListTool(store));
   reg.register(buildMemoryExplainTool(store, rerankWeights));
