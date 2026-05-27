@@ -20,13 +20,16 @@ import { log } from "../lib/log.js";
 export function formatNeighborhood(n: MemoryNeighborhood): string {
   if (!n || (n.parents.length === 0 && n.children.length === 0)) return "";
   const lines: string[] = [];
+  // Compact neighborhood — symbols ↑/↓ defined in system prompt legend.
+  // Use 8-char id prefix (consistent with the id: field on the parent entry).
+  // Reason is truncated to keep context scannable.
   for (const p of n.parents) {
-    const why = p.reason ? `  // ${p.reason}` : "";
-    lines.push(`  ↑ ${p.id} [${p.category}] "${p.title}" — ${p.relation}  (${p.childCount} filhos)${why}`);
+    const why = p.reason ? `  // ${p.reason.slice(0, 80)}` : "";
+    lines.push(`  ↑ ${p.title} — ${p.relation}  (id:${p.id.slice(0, 8)})${why}`);
   }
   for (const c of n.children) {
-    const why = c.reason ? `  // ${c.reason}` : "";
-    lines.push(`  ↓ ${c.id} [${c.category}] "${c.title}" — ${c.relation}  (${c.childCount} filhos)${why}`);
+    const why = c.reason ? `  // ${c.reason.slice(0, 80)}` : "";
+    lines.push(`  ↓ ${c.title} — ${c.relation}  (id:${c.id.slice(0, 8)})${why}`);
   }
   return lines.join("\n");
 }
@@ -578,54 +581,48 @@ export class RetrieverPiece {
   private format(hits: RetrievalHit[], workflowHits: string[] = []): string {
     if (!hits.length && !workflowHits.length) return "";
     const lines: string[] = [];
-    if (hits.length) {
-      lines.push("## Mnemosyne — Relevant memories", "");
-    }
+
+    // Compact format — legend and signal guide live in the static system prompt
+    // (gatedRetrieverPiece.systemContext). The ephemeral block uses the same
+    // symbols/notations defined there without re-explaining them.
     hits.forEach((hit) => {
       const m = hit.memory;
-      const bd = hit.scoreBreakdown;
 
-      // Strength label based on rerank total score
+      // ● vector / ◦ graph  HIGH|MEDIUM|WEAK  [category]  title
       const strength = hit.score >= 0.7 ? "HIGH" : hit.score >= 0.4 ? "MEDIUM" : "WEAK";
-
-      // Source tag
       const sourceTag = hit.source === "graph" ? "◦ graph" : "● vector";
-
-      // sim + rerank
-      const simStr = hit.vectorSim != null ? `sim ${hit.vectorSim.toFixed(2)}` : null;
-      const rerankStr = `rerank ${hit.score.toFixed(2)}`;
-      const scores = [simStr, rerankStr].filter(Boolean).join("  ");
-
-      // Title line: source · strength · [category] title
       lines.push(`${sourceTag}  ${strength}  [${m.category}]  ${m.title}`);
 
-      // Score line
+      // Scores: sim (when available) + rerank + conf + reinf
+      const simStr = hit.vectorSim != null ? `sim ${hit.vectorSim.toFixed(2)}` : null;
+      const scores = [simStr, `rerank ${hit.score.toFixed(2)}`].filter(Boolean).join("  ");
       lines.push(`  ${scores}  ·  conf ${m.confidence?.toFixed(2) ?? "—"}  ·  reinf ${m.reinforcements}`);
 
-      // Why: score breakdown components
+      // why: score breakdown — debug signal kept for retrieval transparency
+      const bd = hit.scoreBreakdown;
       if (bd) {
         lines.push(`  why: recency ${bd.recency.toFixed(2)}  conf ${bd.confidence.toFixed(2)}  reinf ${bd.reinforcements.toFixed(2)}  graph ${bd.graphDistance.toFixed(1)}`);
       }
 
-      // Match snippet (why this memory matched the query)
+      // matched on `terms`: snippet — explains why this memory was retrieved
       if (hit.matchSnippet?.matchedTerms?.length) {
         lines.push(`  matched on \`${hit.matchSnippet.matchedTerms.join(", ")}\`: ${hit.matchSnippet.text.slice(0, 120)}`);
       }
 
-      // Content
+      // Memory content
       lines.push(`> ${m.content}`);
 
-      // Conflicts
+      // ⚠️ conflict marker (rare — only when detected)
       if (hit.conflicts_with?.length) {
         const refs = hit.conflicts_with.map((c) => c.slice(0, 4)).join(", ");
         lines.push(`⚠️ Conflicts with: ${refs}`);
       }
 
-      // v1.3 — inline graph neighborhood (parents ↑ / children ↓ with child count).
+      // ↑/↓ graph neighborhood (defined in system prompt legend)
       const neighborhood = hit.neighborhood ? formatNeighborhood(hit.neighborhood) : "";
       if (neighborhood) lines.push(neighborhood);
 
-      // Expose short ID so the LLM can emit [mnemo:used:ID] or [mnemo:update:ID:...] signals.
+      // id — use with memory_fetch(id), [mnemo:used:ID], [mnemo:update:ID:...]
       lines.push(`  id:${m.id.slice(0, 8)}`);
 
       lines.push("");
