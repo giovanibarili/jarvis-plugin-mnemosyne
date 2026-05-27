@@ -548,12 +548,43 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
                   const props = edge?.raw?.properties ?? edge?.properties ?? {};
                   const reason = props.reason;
                   const evidence = props.evidence;
-                  if (!reason && !evidence) return undefined;
-                  const parts: string[] = [];
-                  if (reason) parts.push(reason);
-                  if (evidence) parts.push(`Evidence: ${evidence}`);
-                  // vis-network accepts a DOM element or plain string for tooltip
-                  return parts.join("\n");
+                  const relation = props.relation;
+                  if (!reason && !evidence && !relation) return undefined;
+                  const relLabels: Record<string, string> = {
+                    "reinforces": "reinforces",
+                    "extends": "extends",
+                    "example-of": "example of",
+                    "depends-on": "depends on",
+                    "merge": "merge",
+                    "supersede": "supersede",
+                    "relates_to": "relates to",
+                    "relates_to_variant": "variant of",
+                  };
+                  const relColors: Record<string, string> = {
+                    "reinforces": "#10b981",
+                    "extends": "#3b82f6",
+                    "example-of": "#06b6d4",
+                    "depends-on": "#f59e0b",
+                  };
+                  const relColor = relColors[relation] ?? "#9ca3af";
+                  const el = document.createElement("div");
+                  el.style.cssText = "font-family:system-ui;font-size:12px;color:#e0e0e0;" +
+                    "background:#111;padding:8px 12px;border-radius:6px;" +
+                    "border:1px solid #333;max-width:320px;line-height:1.6;";
+                  const rows: string[] = [];
+                  if (relation) {
+                    rows.push(`<div style="font-weight:600;color:${relColor};margin-bottom:4px;">` +
+                      `${relLabels[relation] ?? relation}</div>`);
+                  }
+                  if (reason) {
+                    rows.push(`<div style="color:#d1d5db;">${reason}</div>`);
+                  }
+                  if (evidence) {
+                    rows.push(`<div style="color:#9ca3af;font-size:11px;margin-top:4px;">` +
+                      `<span style="color:#6b7280;">evidence:</span> ${evidence}</div>`);
+                  }
+                  el.innerHTML = rows.join("");
+                  return el;
                 },
                 color: (edge: any) => {
                   const rel = edge?.raw?.properties?.relation ?? edge?.properties?.relation;
