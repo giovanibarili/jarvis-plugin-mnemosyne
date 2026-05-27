@@ -275,6 +275,11 @@ export function createPieces(ctx: PluginContext): Piece[] {
 The following memories were retrieved by Mnemosyne based on the current conversation context. Use them as background knowledge — past decisions, preferences, and patterns from previous sessions. Do not cite them verbatim unless directly relevant to the current task.
 
 ${block}
+
+## Memory feedback (important)
+If a memory above was directly useful to answer the current request, emit [mnemo:used:ID] once in your response (ID is the memory's short id shown after "id:" in the detail pane, or the first 8 chars of the id field visible in the block above via the id field on each memory).
+If you learned new evidence or context that would enrich a specific memory, emit [mnemo:update:ID:one sentence of new evidence] — keep it factual and concise.
+These signals are invisible to the user and help the memory system learn what is relevant. Only emit them when genuinely applicable — not for every response.
 </system-reminder>`;
 
       return [wrapped];

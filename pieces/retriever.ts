@@ -228,6 +228,10 @@ export class RetrieverPiece {
         hist.push({ user, assistant });
         if (hist.length > this.QUERY_CONTEXT_TURNS) hist.shift();
         this.recentTurns.set(sid, hist);
+        // Parse memory feedback signals emitted by the LLM.
+        // Signals are stripped from the final response by the Chat renderer
+        // so they are never shown to the user.
+        void this._parseFeedback(assistant).catch(() => {});
       }
     });
 
@@ -498,6 +502,60 @@ export class RetrieverPiece {
     }
   }
 
+  /**
+   * Parse memory feedback signals emitted inline by the LLM in its response.
+   *
+   * Supported signals (invisible to the user — stripped by the renderer):
+   *   [mnemo:used:ID]                 — LLM explicitly used this memory;
+   *                                     bumps reinforcements beyond the
+   *                                     retrieval-time increment.
+   *   [mnemo:update:ID:new evidence]  — LLM adds new evidence/context that
+   *                                     enriches the memory.
+   *
+   * Both signals are best-effort: failures are silently swallowed.
+   */
+  private async _parseFeedback(text: string): Promise<void> {
+    // Resolve a short prefix (8 chars) to a full UUID using recent hits across sessions.
+    const resolve = (prefix: string): string | null => {
+      if (prefix.length > 16) return prefix; // already a full UUID
+      for (const hits of this.lastHits.values()) {
+        for (const h of hits) {
+          if (h.memory.id.startsWith(prefix)) return h.memory.id;
+        }
+      }
+      return prefix.length >= 32 ? prefix : null; // reject very short IDs
+    };
+
+    // Match [mnemo:used:ID]
+    const usedRe = /\[mnemo:used:([a-zA-Z0-9_\-]+)\]/g;
+    let m: RegExpExecArray | null;
+    while ((m = usedRe.exec(text)) !== null) {
+      const id = resolve(m[1]);
+      if (!id) continue;
+      try {
+        await this.store.incrementReinforcements(id);
+        console.debug(`[mnemosyne] feedback:used reinforced ${id}`);
+      } catch { /* swallow */ }
+    }
+
+    // Match [mnemo:update:ID:new evidence text]
+    const updateRe = /\[mnemo:update:([a-zA-Z0-9_\-]+):([^\]]+)\]/g;
+    while ((m = updateRe.exec(text)) !== null) {
+      const id = resolve(m[1]);
+      const newEvidence = m[2].trim();
+      if (!id || !newEvidence) continue;
+      try {
+        const mem = await this.store.markdownStore.read(id).catch(() => null);
+        if (!mem) continue;
+        const existing = mem.evidence ?? "";
+        if (existing.includes(newEvidence)) continue;
+        const updated = { ...mem, evidence: existing ? `${existing}\n${newEvidence}` : newEvidence };
+        await this.store.write(updated);
+        console.debug(`[mnemosyne] feedback:update enriched ${id}`);
+      } catch { /* swallow */ }
+    }
+  }
+
   private format(hits: RetrievalHit[], workflowHits: string[] = []): string {
     if (!hits.length && !workflowHits.length) return "";
     const lines: string[] = [];
@@ -547,6 +605,9 @@ export class RetrieverPiece {
       // v1.3 — inline graph neighborhood (parents ↑ / children ↓ with child count).
       const neighborhood = hit.neighborhood ? formatNeighborhood(hit.neighborhood) : "";
       if (neighborhood) lines.push(neighborhood);
+
+      // Expose short ID so the LLM can emit [mnemo:used:ID] or [mnemo:update:ID:...] signals.
+      lines.push(`  id:${m.id.slice(0, 8)}`);
 
       lines.push("");
     });
