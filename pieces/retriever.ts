@@ -486,16 +486,39 @@ export class RetrieverPiece {
     //    best vector hits, then fill remaining slots with the best graph hits.
     //    This ensures the LLM always sees direct semantic matches first.
     const reranked = this.reranker.rerank(memories);
-    const MIN_VECTOR_SLOTS = Math.min(2, this.opts.topK); // at least 2 vector hits if available
-    const vectorHits = reranked.filter((h) => h.source === "vector");
+
+    // Graph-complement strategy: reserve slots for GOOD vector hits only.
+    // A vector hit is UNRELATED when sim < -0.15 AND score < 0.50 — it was
+    // pulled by Chroma but has no semantic relevance. Don't give these hits
+    // reserved slots — they'd displace useful graph hits.
+    const SIM_UNRELATED = -0.15;
+    const SCORE_UNRELATED_MIN = 0.50;
+    const isUnrelatedVector = (h: RetrievalHit) =>
+      h.source === "vector" &&
+      h.vectorSim != null &&
+      h.vectorSim < SIM_UNRELATED &&
+      h.score < SCORE_UNRELATED_MIN;
+
+    const MIN_VECTOR_SLOTS = Math.min(2, this.opts.topK);
+    // Only RELATED vector hits get reserved slots
+    const goodVectorHits = reranked.filter((h) => h.source === "vector" && !isUnrelatedVector(h));
     const graphHits = reranked.filter((h) => h.source !== "vector");
-    // Take up to MIN_VECTOR_SLOTS best vector hits, then fill rest with graph
-    const topVector = vectorHits.slice(0, MIN_VECTOR_SLOTS);
+    // Unrelated vectors fill remaining slots only if there's space (low priority)
+    const unrelatedVectorHits = reranked.filter(isUnrelatedVector);
+
+    const topVector = goodVectorHits.slice(0, MIN_VECTOR_SLOTS);
     const remainingSlots = this.opts.topK - topVector.length;
-    const topGraph = graphHits.slice(0, remainingSlots);
-    // Merge: vector first (semantic anchor), then graph (contextual expansion)
-    const top = [...topVector, ...topGraph];
-    log.info({ sessionId, beforeRerank: memories.length, afterRerank: top.length, vectorInTop: topVector.length, graphInTop: topGraph.length }, "mnemosyne: retrieve — rerank done");
+    // Fill remaining with graph hits first, then unrelated vectors as last resort
+    const topRest = [...graphHits, ...unrelatedVectorHits].slice(0, remainingSlots);
+    const top = [...topVector, ...topRest];
+    log.info({
+      sessionId,
+      beforeRerank: memories.length,
+      afterRerank: top.length,
+      vectorGood: topVector.length,
+      vectorUnrelated: unrelatedVectorHits.length,
+      graphInTop: topRest.filter((h) => h.source !== "vector").length,
+    }, "mnemosyne: retrieve — rerank done");
 
     // 6. v1.3 — attach graph neighborhood (parents + children) to each
     //    surviving hit. Best-effort: a Neo4j hiccup must not break retrieval.
