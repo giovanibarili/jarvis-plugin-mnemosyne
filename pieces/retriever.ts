@@ -480,9 +480,22 @@ export class RetrieverPiece {
     //    .vectorSim (we passed it through above). The UI uses vectorSim for
     //    sorting/display so the user sees "best semantic match first" rather
     //    than "most-reinforced first".
+    //
+    //    Graph-complement strategy: graph hits should AUGMENT vector results,
+    //    not replace them. We reserve up to MIN_VECTOR_SLOTS slots for the
+    //    best vector hits, then fill remaining slots with the best graph hits.
+    //    This ensures the LLM always sees direct semantic matches first.
     const reranked = this.reranker.rerank(memories);
-    const top = reranked.slice(0, this.opts.topK);
-    log.info({ sessionId, beforeRerank: memories.length, afterRerank: top.length }, "mnemosyne: retrieve — rerank done");
+    const MIN_VECTOR_SLOTS = Math.min(2, this.opts.topK); // at least 2 vector hits if available
+    const vectorHits = reranked.filter((h) => h.source === "vector");
+    const graphHits = reranked.filter((h) => h.source !== "vector");
+    // Take up to MIN_VECTOR_SLOTS best vector hits, then fill rest with graph
+    const topVector = vectorHits.slice(0, MIN_VECTOR_SLOTS);
+    const remainingSlots = this.opts.topK - topVector.length;
+    const topGraph = graphHits.slice(0, remainingSlots);
+    // Merge: vector first (semantic anchor), then graph (contextual expansion)
+    const top = [...topVector, ...topGraph];
+    log.info({ sessionId, beforeRerank: memories.length, afterRerank: top.length, vectorInTop: topVector.length, graphInTop: topGraph.length }, "mnemosyne: retrieve — rerank done");
 
     // 6. v1.3 — attach graph neighborhood (parents + children) to each
     //    surviving hit. Best-effort: a Neo4j hiccup must not break retrieval.
