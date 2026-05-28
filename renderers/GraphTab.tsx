@@ -68,6 +68,15 @@ export interface SelectedEdge {
   evidence: string | null;
   fromTitle: string | null;
   toTitle: string | null;
+  /** Memory UUID of the other end of the edge (may be null if not resolvable) */
+  otherId: string | null;
+}
+
+export interface NodeSelection {
+  /** Memory UUID of the clicked node */
+  id: string;
+  /** All edges connected to this node */
+  edges: SelectedEdge[];
 }
 
 interface Props {
@@ -75,6 +84,8 @@ interface Props {
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onSelectEdge: (edge: SelectedEdge | null) => void;
+  /** Called with full node+edges info when a node is clicked */
+  onSelectNode?: (selection: NodeSelection | null) => void;
   /** Available project values for the filter (same list MnemosynePanel computes). */
   projects: string[];
 }
@@ -299,7 +310,7 @@ function summarizeFilters(filters: Filters): string {
   return parts.join(", ");
 }
 
-export default function GraphTab({ memories, selectedId, onSelect, projects }: Props) {
+export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge, onSelectNode, projects }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const visRef = useRef<any>(null);
 
@@ -316,6 +327,8 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
   const [searching, setSearching] = useState(false);
   // Dynamic category list — fetched from Neo4j on mount and Refresh.
   const [allCategories, setAllCategories] = useState<string[]>(ALL_CATEGORIES_STATIC);
+  // DEBUG: surface last click event data
+  const [debugClick, setDebugClick] = useState<string | null>(null);
 
   // Fetch categories on mount
   useEffect(() => {
@@ -679,6 +692,84 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
 
     visRef.current = viz;
 
+    // NeoVis ClickEdgeEvent may not fire reliably — hook vis-network directly.
+    // We attach after viz.render() so the vis-network instance is available.
+    // Declared BEFORE use to avoid TDZ (temporal dead zone) with const.
+    const attachEdgeClick = () => {
+      const net = visRef.current?.network as any;
+      if (!net) return;
+      net.on("click", (evt: any) => {
+        console.log("[GraphTab] net.on(click)", { nodes: evt.nodes, edges: evt.edges });
+        setDebugClick(`click nodes=[${(evt.nodes||[]).join(",")}] edges=[${(evt.edges||[]).join(",")}]`);
+
+        const str = (v: any): string | null => {
+          if (v == null) return null;
+          if (typeof v === "string") return v || null;
+          if (typeof v === "number") return String(v) || null;
+          if (typeof v === "object" && "low" in v) return String(v.low) || null;
+          return String(v) || null;
+        };
+        const getNodeTitle = (visId: any): string | null =>
+          net?.body?.data?.nodes?.get?.(visId)?.label ?? null;
+        const getNodeId = (visId: any): string | null => {
+          const nd = net?.body?.data?.nodes?.get?.(visId);
+          const p = nd?.raw?.properties ?? nd?.properties ?? {};
+          return str(p.id) ?? str(p.uuid) ?? null;
+        };
+
+        // Node click: build full edge list and call onSelectNode
+        if (evt.nodes && evt.nodes.length > 0) {
+          const visNodeId = evt.nodes[0];
+          const nodeData = net?.body?.data?.nodes?.get?.(visNodeId);
+          const nodeProps = nodeData?.raw?.properties ?? nodeData?.properties ?? {};
+          const id = str(nodeProps.id) ?? str(nodeProps.uuid) ?? str(nodeProps.name) ?? null;
+          if (id) {
+            onSelect(id);
+            if (onSelectNode) {
+              const connectedEdgeIds: any[] = net.getConnectedEdges?.(visNodeId) ?? [];
+              const edges: SelectedEdge[] = connectedEdgeIds.map((eid: any) => {
+                const be = net?.body?.edges?.[eid];
+                const rp = be?.options?.raw?.properties ?? be?.raw?.properties
+                  ?? net?.body?.data?.edges?.get?.(eid)?.raw?.properties
+                  ?? net?.body?.data?.edges?.get?.(eid)?.properties ?? {};
+                const cn: any[] = net.getConnectedNodes?.(eid) ?? [];
+                const otherVisId = cn.find((n: any) => n !== visNodeId) ?? cn[0];
+                return {
+                  relation: str(rp.relation) ?? "relates to",
+                  reason:   str(rp.reason),
+                  evidence: str(rp.evidence),
+                  fromTitle: getNodeTitle(cn[0]),
+                  toTitle:   getNodeTitle(cn[1]),
+                  otherId:   otherVisId != null ? getNodeId(otherVisId) : null,
+                };
+              });
+              onSelectNode({ id, edges });
+            }
+          }
+          return;
+        }
+
+        // Edge-only click
+        if (!evt.edges || evt.edges.length === 0) return;
+        const edgeId = evt.edges[0];
+        const bodyEdge = net?.body?.edges?.[edgeId];
+        const rawProps = bodyEdge?.options?.raw?.properties
+          ?? bodyEdge?.raw?.properties
+          ?? net?.body?.data?.edges?.get?.(edgeId)?.raw?.properties
+          ?? net?.body?.data?.edges?.get?.(edgeId)?.properties ?? {};
+        const connectedNodes = net?.getConnectedNodes?.(edgeId) ?? [];
+        onSelectEdge({
+          relation: str(rawProps.relation) ?? "relates to",
+          reason:   str(rawProps.reason),
+          evidence: str(rawProps.evidence),
+          fromTitle: getNodeTitle(connectedNodes[0]),
+          toTitle:   getNodeTitle(connectedNodes[1]),
+          otherId: null,
+        });
+        onSelect(null);
+      });
+    };
+
     viz.registerOnEvent(NeoVisEvents.CompletionEvent, (evt: any) => {
       if (cancelled) return;
       setLoading(false);
@@ -690,65 +781,9 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
       setLoading(false);
       setError(String(evt?.error?.message ?? evt?.error ?? "unknown error"));
     });
-    viz.registerOnEvent(NeoVisEvents.ClickNodeEvent, (evt: any) => {
-      // NeoVis can return node data in several shapes; extract the Neo4j
-      // property "id" (our UUID string) robustly regardless of shape.
-      const raw = evt?.node?.raw;
-      const props = raw?.properties ?? evt?.node?.properties ?? {};
-
-      // Helper: coerce any value to string (handles Neo4j Integer objects too)
-      const str = (v: any): string | null => {
-        if (v == null) return null;
-        if (typeof v === "string") return v || null;
-        if (typeof v === "number") return String(v) || null;
-        // Neo4j driver Integer object: { low, high }
-        if (typeof v === "object" && "low" in v) return String(v.low) || null;
-        return String(v) || null;
-      };
-
-      const id = str(props.id) ?? str(props.uuid) ?? str(props.name) ?? null;
-
-      console.debug("[GraphTab] ClickNodeEvent", { visId: evt?.node?.id, props, resolved: id });
-
-      if (id) onSelect(id);
-    });
-
-    // NeoVis ClickEdgeEvent may not fire reliably — hook vis-network directly.
-    // We attach after viz.render() so the vis-network instance is available.
-    const attachEdgeClick = () => {
-      const net = visRef.current?.network as any;
-      if (!net) return;
-      net.on("click", (evt: any) => {
-        // Edge takes priority: if edges array is non-empty, open edge panel.
-        // (vis-network may also populate evt.nodes when clicking near a node.)
-        if (!evt.edges || evt.edges.length === 0) return;
-        const edgeId = evt.edges[0];
-        const str = (v: any): string | null => {
-          if (v == null) return null;
-          if (typeof v === "object" && "low" in v) return String(v.low) || null;
-          return String(v) || null;
-        };
-        // Get edge properties from vis-network body
-        const edgeData = net?.body?.data?.edges?.get?.(edgeId);
-        const props = edgeData?.raw?.properties ?? edgeData?.properties ?? {};
-        // Resolve node titles
-        const connectedNodes = net?.getConnectedNodes?.(edgeId) ?? [];
-        const getNodeTitle = (visId: any): string | null => {
-          const nodeData = net?.body?.data?.nodes?.get?.(visId);
-          return nodeData?.label ?? null;
-        };
-        const fromTitle = connectedNodes[0] != null ? getNodeTitle(connectedNodes[0]) : null;
-        const toTitle   = connectedNodes[1] != null ? getNodeTitle(connectedNodes[1]) : null;
-        onSelectEdge({
-          relation: str(props.relation) ?? "relates to",
-          reason:   str(props.reason),
-          evidence: str(props.evidence),
-          fromTitle,
-          toTitle,
-        });
-        onSelect(null);
-      });
-    };
+    // ClickNodeEvent is handled via net.on("click") above (attachEdgeClick),
+    // which fires reliably and handles both node and edge clicks in one place.
+    viz.registerOnEvent(NeoVisEvents.ClickNodeEvent, (_evt: any) => { /* noop */ });
 
     viz.render();
 
@@ -764,7 +799,7 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
         containerRef.current.innerHTML = "";
       }
     };
-  }, [filters, renderTick]);
+  }, [filters, renderTick, onSelect, onSelectEdge]);
 
   const toggleCategory = useCallback((c: Category) => {
     setFilters((prev) => {
@@ -933,6 +968,11 @@ export default function GraphTab({ memories, selectedId, onSelect, projects }: P
           </button>
 
           <span style={styles.summary}>{summary}</span>
+          {debugClick && (
+            <span style={{ marginLeft: 12, fontSize: 11, color: "#f59e0b", fontFamily: "monospace" }}>
+              {debugClick}
+            </span>
+          )}
         </div>
       </div>
 

@@ -96,7 +96,64 @@ export default function MnemosynePanel({ state }: Props) {
   const [filterLayer, setFilterLayer] = useState<FilterLayer>("all");
   const [filterProject, setFilterProject] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selectedEdge, setSelectedEdge] = useState<import('./GraphTab').SelectedEdge | null>(null);
+  // Edges connected to the currently selected node (from graph click or Neo4j fetch)
+  const [nodeEdges, setNodeEdges] = useState<import('./GraphTab').SelectedEdge[]>([]);
+
+  // Fetch edges for a memory ID directly from Neo4j.
+  // Used when selection comes from the edge panel (no vis-network available).
+  const fetchEdgesForMemory = useCallback(async (memoryId: string) => {
+    try {
+      const res = await fetch("http://127.0.0.1:7474/db/neo4j/tx/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Basic bmVvNGo6" },
+        body: JSON.stringify({ statements: [{
+          statement: `
+            MATCH (m:Memory {id: $id})-[r]-(other:Memory)
+            RETURN r.relation AS relation, r.reason AS reason, r.evidence AS evidence,
+                   m.title AS fromTitle, other.title AS toTitle, other.id AS otherId
+          `,
+          parameters: { id: memoryId },
+        }]}),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const rows = data?.results?.[0]?.data ?? [];
+      const edges: import('./GraphTab').SelectedEdge[] = rows.map((row: any) => {
+        const [relation, reason, evidence, fromTitle, toTitle, otherId] = row.row ?? [];
+        return {
+          relation: relation ?? "relates to",
+          reason:   reason ?? null,
+          evidence: evidence ?? null,
+          fromTitle: fromTitle ?? null,
+          toTitle:   toTitle ?? null,
+          otherId:   otherId ?? null,
+        };
+      });
+      setNodeEdges(edges);
+    } catch {
+      // Neo4j unreachable — silently skip
+    }
+  }, []);
+
+  // Whenever selectedId changes (from any source), load its edges from Neo4j.
+  useEffect(() => {
+    if (!selectedId) { setNodeEdges([]); return; }
+    fetchEdgesForMemory(selectedId);
+  }, [selectedId, fetchEdgesForMemory]);
+
+  // Stable callbacks for GraphTab — must not be inline arrows or the neovis
+  // useEffect will re-run (and destroy the graph) on every MnemosynePanel render.
+  const handleGraphSelect = useCallback((id: string | null) => {
+    setSelectedId(id);
+  }, []);
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const handleGraphSelectEdge = useCallback((_edge: import('./GraphTab').SelectedEdge | null) => {
+    // No longer used — edges are shown inside the node detail panel via onSelectNode
+  }, []);
+  const handleGraphSelectNode = useCallback((selection: import('./GraphTab').NodeSelection | null) => {
+    setSelectedId(selection?.id ?? null);
+    // nodeEdges will be populated by the useEffect above
+  }, []);
   // Memory fetched on demand when clicked node is not in the preloaded list
   const [fetchedMemory, setFetchedMemory] = useState<Memory | null>(null);
   const [actionStatus, setActionStatus] = useState<string>("");
@@ -364,59 +421,16 @@ export default function MnemosynePanel({ state }: Props) {
           <GraphTab
             memories={memories}
             selectedId={selectedId}
-            onSelect={(id) => { setSelectedId(id); setSelectedEdge(null); }}
-            onSelectEdge={(edge) => { setSelectedEdge(edge); setSelectedId(null); }}
+            onSelect={handleGraphSelect}
+            onSelectEdge={handleGraphSelectEdge}
+            onSelectNode={handleGraphSelectNode}
             projects={projects}
           />
         ) : (
           <PromptsTab />
         )}
 
-        {selectedEdge && activeTab === "graph" ? (
-          <div style={styles.detail}>
-            <div style={styles.detailHeader}>
-              <div style={styles.detailTitle}>
-                {selectedEdge.relation.replace(/_/g, " ")}
-              </div>
-              <button style={styles.closeBtn} onClick={() => setSelectedEdge(null)} title="Close">✕</button>
-            </div>
-            <div style={styles.detailMeta}>
-              <span style={{ ...styles.detailChip, color: (
-                selectedEdge.relation === "reinforces" ? "#10b981" :
-                selectedEdge.relation === "extends" ? "#3b82f6" :
-                selectedEdge.relation === "example-of" ? "#06b6d4" :
-                selectedEdge.relation === "depends-on" ? "#f59e0b" :
-                selectedEdge.relation === "contradicts" ? "#ef4444" :
-                selectedEdge.relation === "supersede" ? "#a855f7" :
-                "#9ca3af"
-              ), borderColor: "currentColor" }}>edge</span>
-            </div>
-            {selectedEdge.fromTitle || selectedEdge.toTitle ? (
-              <div style={{ padding: "0 12px 8px", fontSize: "11px", color: "#6b7280" }}>
-                <div style={{ marginBottom: "4px" }}>
-                  <span style={{ color: "#9ca3af" }}>from </span>
-                  <span style={{ color: "#d1d5db" }}>{selectedEdge.fromTitle ?? "—"}</span>
-                </div>
-                <div>
-                  <span style={{ color: "#9ca3af" }}>to </span>
-                  <span style={{ color: "#d1d5db" }}>{selectedEdge.toTitle ?? "—"}</span>
-                </div>
-              </div>
-            ) : null}
-            {selectedEdge.reason ? (
-              <div style={styles.detailEvidenceWrap}>
-                <div style={styles.detailLabel}>reason</div>
-                <pre style={styles.detailEvidence}>{selectedEdge.reason}</pre>
-              </div>
-            ) : null}
-            {selectedEdge.evidence ? (
-              <div style={styles.detailEvidenceWrap}>
-                <div style={styles.detailLabel}>evidence</div>
-                <pre style={styles.detailEvidence}>{selectedEdge.evidence}</pre>
-              </div>
-            ) : null}
-          </div>
-        ) : selected && activeTab !== "categories" ? (
+        {selected && activeTab !== "categories" ? (
           <div style={styles.detail}>
             <div style={styles.detailHeader}>
               <div style={styles.detailTitle}>{selected.title}</div>
@@ -442,11 +456,58 @@ export default function MnemosynePanel({ state }: Props) {
                 </span>
               ) : null}
             </div>
-            <pre style={styles.detailContent}>{selected.content}</pre>
+            <div style={styles.detailContent}>{selected.content}</div>
             {selected.evidence ? (
               <div style={styles.detailEvidenceWrap}>
                 <div style={styles.detailLabel}>evidence</div>
-                <pre style={styles.detailEvidence}>{selected.evidence}</pre>
+                <div style={styles.detailEvidence}>{selected.evidence}</div>
+              </div>
+            ) : null}
+            {nodeEdges.length > 0 ? (
+              <div style={styles.detailEvidenceWrap}>
+                <div style={styles.detailLabel}>relations ({nodeEdges.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  {nodeEdges.map((e, i) => {
+                    const relColors: Record<string, string> = {
+                      "reinforces": "#10b981", "extends": "#3b82f6",
+                      "example-of": "#06b6d4", "depends-on": "#f59e0b",
+                      "contradicts": "#ef4444", "supersede": "#a855f7",
+                    };
+                    const color = relColors[e.relation] ?? "#9ca3af";
+                    const otherTitle = e.fromTitle === selected.title ? e.toTitle : e.fromTitle;
+                    return (
+                      <div
+                        key={i}
+                        style={{
+                          padding: "6px 8px",
+                          borderRadius: "4px",
+                          border: `1px solid ${color}33`,
+                          backgroundColor: "#0e0e0e",
+                          cursor: e.otherId ? "pointer" : "default",
+                        }}
+                        onClick={() => {
+                          if (e.otherId) setSelectedId(e.otherId);
+                          // nodeEdges auto-reloaded by useEffect on selectedId change
+                        }}
+                        title={e.otherId ? `Open: ${otherTitle}` : undefined}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: e.reason ? "4px" : 0 }}>
+                          <span style={{ fontSize: "10px", color, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                            {e.relation.replace(/_/g, " ")}
+                          </span>
+                          {otherTitle ? (
+                            <span style={{ fontSize: "11px", color: "#d1d5db", flex: 1, wordBreak: "break-word" }}>
+                              → {otherTitle}
+                            </span>
+                          ) : null}
+                        </div>
+                        {e.reason ? (
+                          <div style={{ fontSize: "11px", color: "#9ca3af", lineHeight: 1.4 }}>{e.reason}</div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             ) : null}
             <div style={styles.detailFooter}>
@@ -667,18 +728,12 @@ const styles: Record<string, any> = {
     borderRadius: "10px",
   },
   detailContent: {
-    fontFamily: "ui-monospace, Menlo, Consolas, monospace",
     fontSize: "12px",
-    color: "#ddd",
-    backgroundColor: "#0a0a0a",
-    border: "1px solid #1f1f1f",
-    padding: "8px 10px",
-    borderRadius: "4px",
-    margin: 0,
+    color: "#d1d5db",
+    lineHeight: 1.6,
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
-    maxHeight: "40vh",
-    overflowY: "auto",
+    padding: "0 2px",
   },
   detailEvidenceWrap: { display: "flex", flexDirection: "column", gap: "4px" },
   detailLabel: {
@@ -689,14 +744,9 @@ const styles: Record<string, any> = {
     fontWeight: 600,
   },
   detailEvidence: {
-    fontFamily: "ui-monospace, Menlo, Consolas, monospace",
     fontSize: "11px",
-    color: "#a0a0a0",
-    backgroundColor: "#0a0a0a",
-    border: "1px solid #1f1f1f",
-    padding: "6px 8px",
-    borderRadius: "4px",
-    margin: 0,
+    color: "#9ca3af",
+    lineHeight: 1.5,
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
   },
