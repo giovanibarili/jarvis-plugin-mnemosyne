@@ -77,9 +77,17 @@ export function buildHint(hits: RetrievalHit[]): string {
   const hasRelations = hits.some(
     (h) => h.neighborhood && (h.neighborhood.parents.length > 0 || h.neighborhood.children.length > 0)
   );
-  return hasRelations
+  const navHint = hasRelations
     ? "\n_↑/↓ entries above are navigable knowledge nodes — call `memory_fetch(id)` to load richer context._"
     : "";
+  // Always remind the LLM to call memory_reinforce after responding.
+  // Placed here (in the ephemeral block) so it's co-located with the injected memories,
+  // not buried 50k chars away in the static system prompt.
+  const feedbackReminder =
+    hits.length > 0
+      ? "\n\n**[MUST after responding]** Call `memory_reinforce(id)` for every memory above that was directly useful. Pass the full `id:` at the bottom of each entry."
+      : "";
+  return navHint + feedbackReminder;
 }
 
 export interface RetrieverOptions {
