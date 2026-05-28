@@ -315,16 +315,12 @@ export class RetrieverPiece {
     log.info({ sid, hits: hits.length, workflowHits: workflowHits.length, totalPool }, "mnemosyne: retriever — retrieved");
 
     // #1 — Filter UNRELATED hits before formatting.
-    // A hit is UNRELATED when it has a vectorSim that falls below the sim
-    // penalty floor used in the reranker (sim < -0.15) AND its rerank score
-    // did not recover enough (< 0.50). Graph hits have no vectorSim, so they
-    // are never filtered here (they were pulled by explicit relation).
-    const SIM_UNRELATED_THRESHOLD = -0.15;
-    const RERANK_UNRELATED_MIN   = 0.50;
+    // Filter UNRELATED vector hits: negative sim = no semantic relevance.
+    // Graph hits are never filtered (pulled by explicit relation, not by sim).
+    // Consistent with retrieve() slot logic: sim < 0 → not a semantic match.
     const filteredHits = hits.filter((h) => {
       if (h.source === "graph" || h.vectorSim == null) return true;
-      if (h.vectorSim < SIM_UNRELATED_THRESHOLD && h.score < RERANK_UNRELATED_MIN) return false;
-      return true;
+      return h.vectorSim >= 0; // drop any vector with negative cosine similarity
     });
     // Sort injected hits: vector hits by sim desc, then graph hits (sim=null) at bottom.
     // This ensures the LLM sees the strongest semantic match first.
@@ -487,36 +483,28 @@ export class RetrieverPiece {
     //    This ensures the LLM always sees direct semantic matches first.
     const reranked = this.reranker.rerank(memories);
 
-    // Graph-complement strategy: reserve slots for GOOD vector hits only.
-    // A vector hit is UNRELATED when sim < -0.15 AND score < 0.50 — it was
-    // pulled by Chroma but has no semantic relevance. Don't give these hits
-    // reserved slots — they'd displace useful graph hits.
-    const SIM_UNRELATED = -0.15;
-    const SCORE_UNRELATED_MIN = 0.50;
-    const isUnrelatedVector = (h: RetrievalHit) =>
-      h.source === "vector" &&
-      h.vectorSim != null &&
-      h.vectorSim < SIM_UNRELATED &&
-      h.score < SCORE_UNRELATED_MIN;
-
+    // Graph-complement strategy: reserve slots only for vector hits with
+    // positive cosine similarity (sim >= 0). A negative sim means the
+    // embedding is closer to the opposite pole than the query — no semantic
+    // relevance regardless of rerank score (conf can inflate score even for
+    // semantically unrelated hits). Negative-sim vectors fill remaining
+    // slots only after graph hits, as last resort.
     const MIN_VECTOR_SLOTS = Math.min(2, this.opts.topK);
-    // Only RELATED vector hits get reserved slots
-    const goodVectorHits = reranked.filter((h) => h.source === "vector" && !isUnrelatedVector(h));
-    const graphHits = reranked.filter((h) => h.source !== "vector");
-    // Unrelated vectors fill remaining slots only if there's space (low priority)
-    const unrelatedVectorHits = reranked.filter(isUnrelatedVector);
+    const positiveVectorHits = reranked.filter((h) => h.source === "vector" && (h.vectorSim ?? -1) >= 0);
+    const graphHits          = reranked.filter((h) => h.source !== "vector");
+    const negativeVectorHits = reranked.filter((h) => h.source === "vector" && (h.vectorSim ?? -1) < 0);
 
-    const topVector = goodVectorHits.slice(0, MIN_VECTOR_SLOTS);
+    const topVector = positiveVectorHits.slice(0, MIN_VECTOR_SLOTS);
     const remainingSlots = this.opts.topK - topVector.length;
-    // Fill remaining with graph hits first, then unrelated vectors as last resort
-    const topRest = [...graphHits, ...unrelatedVectorHits].slice(0, remainingSlots);
+    // Graph hits first, negative vectors only if still space
+    const topRest = [...graphHits, ...negativeVectorHits].slice(0, remainingSlots);
     const top = [...topVector, ...topRest];
     log.info({
       sessionId,
       beforeRerank: memories.length,
       afterRerank: top.length,
-      vectorGood: topVector.length,
-      vectorUnrelated: unrelatedVectorHits.length,
+      vectorPositive: topVector.length,
+      vectorNegative: negativeVectorHits.length,
       graphInTop: topRest.filter((h) => h.source !== "vector").length,
     }, "mnemosyne: retrieve — rerank done");
 
