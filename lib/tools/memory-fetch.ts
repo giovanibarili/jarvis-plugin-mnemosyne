@@ -78,7 +78,7 @@ function formatMemoryWithNeighborhood(
     `> ${memory.content}`,
   ];
   if (memory.evidence) {
-    lines.push(`evidence: "${memory.evidence}"`);
+    lines.push(`  evidence (accumulated): "${memory.evidence}"`);
   }
   lines.push("");
 

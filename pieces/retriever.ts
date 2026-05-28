@@ -625,6 +625,12 @@ export class RetrieverPiece {
       // Memory content
       lines.push(`> ${m.content}`);
 
+      // Evidence — compact snippet when present (truncated to keep block lean)
+      if (m.evidence) {
+        const snippet = m.evidence.length > 200 ? m.evidence.slice(0, 200) + "…" : m.evidence;
+        lines.push(`  evidence: ${snippet}`);
+      }
+
       // ⚠️ conflict marker (rare — only when detected)
       if (hit.conflicts_with?.length) {
         const refs = hit.conflicts_with.map((c) => c.slice(0, 4)).join(", ");
