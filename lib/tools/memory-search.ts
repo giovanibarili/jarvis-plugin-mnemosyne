@@ -230,7 +230,14 @@ export function buildMemorySearchTool(store: MnemosyneStore, reranker?: Reranker
           pinned: mem.pinned,
         };
       });
-      return { results };
+      // Hint: nudge the LLM to call memory_fetch on any result that looks
+      // relevant. The search result includes content + scores but NOT the
+      // evidence field or 2-level neighborhood — those require a fetch.
+      const hint =
+        results.length > 0
+          ? `Use memory_fetch(id) on any result above to load its full evidence field and 2-level graph neighborhood before answering.`
+          : undefined;
+      return { results, ...(hint ? { _hint: hint } : {}) };
     },
   };
 }
