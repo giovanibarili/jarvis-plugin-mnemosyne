@@ -309,10 +309,10 @@ export class RetrieverPiece {
     this._stats.retrievals++;
     const query = this.buildQuery(sid);
     log.debug({ sid, queryLen: query.length, queryPreview: query.slice(0, 80) }, "mnemosyne: retriever — querying");
-    const { hits, workflowHits } = await this.retrieve(query, sid);
+    const { hits, workflowHits, totalPool } = await this.retrieve(query, sid);
     this._stats.hitsTotal += hits.length;
     if (hits.length > 0) this._stats.retrievalsWithHits++;
-    log.info({ sid, hits: hits.length, workflowHits: workflowHits.length }, "mnemosyne: retriever — retrieved");
+    log.info({ sid, hits: hits.length, workflowHits: workflowHits.length, totalPool }, "mnemosyne: retriever — retrieved");
 
     // #1 — Filter UNRELATED hits before formatting.
     // A hit is UNRELATED when it has a vectorSim that falls below the sim
@@ -326,7 +326,14 @@ export class RetrieverPiece {
       if (h.vectorSim < SIM_UNRELATED_THRESHOLD && h.score < RERANK_UNRELATED_MIN) return false;
       return true;
     });
-    const block = this.format(filteredHits, workflowHits);
+    // Sort injected hits: vector hits by sim desc, then graph hits (sim=null) at bottom.
+    // This ensures the LLM sees the strongest semantic match first.
+    const sortedHits = [...filteredHits].sort((a, b) => {
+      const av = a.vectorSim ?? -2;
+      const bv = b.vectorSim ?? -2;
+      return bv - av;
+    });
+    const block = this.format(sortedHits, workflowHits, totalPool);
     this.cache.set(sid, { lastUserMsg: lastMsg, block });
     this.lastHits.set(sid, hits); // expose for injector timeline payload
 
@@ -374,7 +381,7 @@ export class RetrieverPiece {
   private async retrieve(
     query: string,
     sessionId: string,
-  ): Promise<{ hits: RetrievalHit[]; workflowHits: string[] }> {
+  ): Promise<{ hits: RetrievalHit[]; workflowHits: string[]; totalPool: number }> {
     log.debug({ sessionId, step: "vector-query", topK: this.opts.topK }, "mnemosyne: retrieve start");
     // 1. Vector top-K from short + long
     const shortHits = await this.store.chroma.query("short", query, this.opts.topK);
@@ -515,7 +522,7 @@ export class RetrieverPiece {
       // mnemosyne_workflows collection may not exist yet — skip silently
     }
 
-    return { hits: top, workflowHits };
+    return { hits: top, workflowHits, totalPool: memories.length };
   }
 
   /**
@@ -591,7 +598,7 @@ export class RetrieverPiece {
     }
   }
 
-  private format(hits: RetrievalHit[], workflowHits: string[] = []): string {
+  private format(hits: RetrievalHit[], workflowHits: string[] = [], totalPool = 0): string {
     if (!hits.length && !workflowHits.length) return "";
     const lines: string[] = [];
 
@@ -664,6 +671,15 @@ export class RetrieverPiece {
     // v1.3 — hint when any hit has relations
     const hint = buildHint(hits);
     if (hint) lines.push(hint);
+
+    // Pool hint — tells the LLM how many memories were in the rerank pool
+    // vs how many were injected, and how to retrieve more.
+    if (totalPool > 0 && totalPool > hits.length) {
+      lines.push(
+        `\n_Showing ${hits.length} of ${totalPool} ranked memories. To retrieve more, call \`memory_search(query, k=20)\` with a higher k._`,
+      );
+    }
+
     return lines.join("\n");
   }
 }
