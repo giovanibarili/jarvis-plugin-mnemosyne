@@ -78,7 +78,7 @@ export function buildHint(hits: RetrievalHit[]): string {
     (h) => h.neighborhood && (h.neighborhood.parents.length > 0 || h.neighborhood.children.length > 0)
   );
   return hasRelations
-    ? "\n_Se necessário explorar uma memória relacionada, use `memory_fetch(id)`._"
+    ? "\n_↑/↓ entries above are navigable knowledge nodes — call `memory_fetch(id)` to load richer context._"
     : "";
 }
 

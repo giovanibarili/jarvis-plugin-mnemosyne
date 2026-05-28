@@ -857,25 +857,25 @@ find additional memories not surfaced automatically.
 
 ### Memory block format
 
-Each injected memory entry looks like:
+Each injected memory entry is a **knowledge node** you can navigate with tools:
 
 \`\`\`
 [●|◦] [vector|graph]  [HIGH|MEDIUM|WEAK]  [category]  <title>
   sim <cosine>  rerank <score>  ·  conf <confidence>  ·  reinf <reinforcements>
 > <full memory content>
-  ↑ <parent title> — <relation>   (broader context)
-  ↓ <child title>  — <relation>   (more specific detail)
-  id:<8-char-id>                  ← USE THIS to call memory_fetch(id)
+  ↑ <parent title> — <relation>  (id:...)   ← broader knowledge — fetch to explore
+  ↓ <child title>  — <relation>  (id:...)   ← specific detail — fetch to explore
+  id:<full-memory-id>            ← memory_fetch / memory_reinforce / memory_add_evidence
 \`\`\`
 
-Signal guide:
-- **● vector** = semantically matched; **◦ graph** = pulled by graph relation from a matched memory
-- **sim** = cosine similarity to query. Negative = weak semantic match (graph/keyword pull)
-- **rerank** = final ranking score (confidence × weight + reinforcements × weight + graph × weight)
-- **conf** = extractor confidence when the memory was created (0–1)
-- **reinf** = times this memory was reinforced by past retrievals (higher = historically relevant)
-- **↑ parent** = broader/more general memory; **↓ child** = more specific sub-fact
-- **id:XXXXXXXX** = 8-char prefix required for \`memory_fetch(id)\`, \`[mnemo:used:ID]\`, \`[mnemo:update:ID:...]\`
+Navigation guide:
+- **● vector** — directly matched by your query. The ↑/↓ relations are **linked knowledge nodes you have not seen** — call \`memory_fetch(id)\` to load them.
+- **◦ graph** — pulled by graph relation from a matched node. Weaker direct match but topically connected — follow ↑ parents for context, ↓ children for detail.
+- **sim** = cosine similarity · **rerank** = final score · **conf** = extractor confidence (0–1)
+- **reinf** = past reinforcements — higher means the system has trusted this memory more over time
+- **↑ parent** = broader/more general node — fetch when you need the wider picture
+- **↓ child** = more specific sub-fact — fetch when you need implementation detail or evidence
+- **id:...** = full memory ID — required for \`memory_fetch(id)\`, \`memory_reinforce(id)\`, \`memory_add_evidence(id, ...)\`
 
 ### Rules for using memory
 
