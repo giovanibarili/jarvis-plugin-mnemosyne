@@ -495,18 +495,29 @@ export class RetrieverPiece {
     const negativeVectorHits = reranked.filter((h) => h.source === "vector" && (h.vectorSim ?? -1) < 0);
 
     const topVector = positiveVectorHits.slice(0, MIN_VECTOR_SLOTS);
-    const remainingSlots = this.opts.topK - topVector.length;
-    // Graph hits first, negative vectors only if still space
-    const topRest = [...graphHits, ...negativeVectorHits].slice(0, remainingSlots);
-    const top = [...topVector, ...topRest];
-    log.info({
-      sessionId,
-      beforeRerank: memories.length,
-      afterRerank: top.length,
-      vectorPositive: topVector.length,
-      vectorNegative: negativeVectorHits.length,
-      graphInTop: topRest.filter((h) => h.source !== "vector").length,
-    }, "mnemosyne: retrieve — rerank done");
+
+    // Graph is strictly a complement to vector — no vector anchor, no graph.
+    // If there are no positive-sim vector hits, graph hits have no semantic
+    // seed and would inject unrelated context. Return empty in that case.
+    const hasVectorAnchor = topVector.length > 0;
+    let top: RetrievalHit[];
+    if (!hasVectorAnchor) {
+      top = [];
+      log.info({ sessionId, beforeRerank: memories.length, afterRerank: 0, reason: "no-vector-anchor" }, "mnemosyne: retrieve — no positive vector hits, suppressing graph");
+    } else {
+      const remainingSlots = this.opts.topK - topVector.length;
+      // Graph hits fill remaining slots; negative vectors dropped entirely
+      const topGraph = graphHits.slice(0, remainingSlots);
+      top = [...topVector, ...topGraph];
+      log.info({
+        sessionId,
+        beforeRerank: memories.length,
+        afterRerank: top.length,
+        vectorPositive: topVector.length,
+        vectorNegative: negativeVectorHits.length,
+        graphInTop: topGraph.length,
+      }, "mnemosyne: retrieve — rerank done");
+    }
 
     // 6. v1.3 — attach graph neighborhood (parents + children) to each
     //    surviving hit. Best-effort: a Neo4j hiccup must not break retrieval.
