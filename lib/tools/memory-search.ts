@@ -38,6 +38,7 @@ interface MemorySearchArgs {
   layer?: "short" | "long" | "both";
   category?: Category;
   project?: string;
+  sort_by?: "sim" | "score" | "confidence" | "reinforcements";
 }
 
 interface MemoryGetArgs {
@@ -117,6 +118,12 @@ export function buildMemorySearchTool(store: MnemosyneStore, reranker?: Reranker
           description: "Optional category filter",
         },
         project: { type: "string", description: "Optional project filter" },
+        sort_by: {
+          type: "string",
+          enum: ["sim", "score", "confidence", "reinforcements"],
+          default: "score",
+          description: "Sort order: sim (raw cosine), score (rerank total), confidence, reinforcements. Default: score",
+        },
       },
       required: ["query"],
     },
@@ -184,6 +191,17 @@ export function buildMemorySearchTool(store: MnemosyneStore, reranker?: Reranker
         const sorted = reranker.rerank(rerankHits);
         breakdowns = new Map(sorted.map((h) => [h.memory.id, h.scoreBreakdown!]));
         reranked = sorted.map((h) => ({ mem: h.memory, vectorSim: h.vectorSim ?? 0, layer: hits.find((x) => x.mem.id === h.memory.id)?.layer ?? "unknown" }));
+      }
+
+      // Apply sort_by override after reranking
+      const sortBy = args.sort_by ?? "score";
+      if (sortBy !== "score") {
+        reranked = [...reranked].sort((a, b) => {
+          if (sortBy === "sim") return b.vectorSim - a.vectorSim;
+          if (sortBy === "confidence") return b.mem.confidence - a.mem.confidence;
+          if (sortBy === "reinforcements") return b.mem.reinforcements - a.mem.reinforcements;
+          return 0;
+        });
       }
 
       const results = reranked.map(({ mem, vectorSim, layer }) => {
