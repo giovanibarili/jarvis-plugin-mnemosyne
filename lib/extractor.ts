@@ -75,7 +75,20 @@ export class Extractor {
 
   private renderTurn(turn: TurnContext): string {
     const tools = turn.tool_calls
-      .map((tc) => `${tc.tool}(${JSON.stringify(tc.args)})`)
+      .map((tc) => {
+        const call = `${tc.tool}(${JSON.stringify(tc.args)})`;
+        // Include result for feedback tools — the LLM's downvote reason and
+        // reinforce neighbors are semantically meaningful for extraction.
+        if (
+          tc.tool === "memory_downvote" ||
+          tc.tool === "memory_reinforce" ||
+          tc.tool === "memory_add_evidence"
+        ) {
+          const resultStr = tc.result ? ` → ${JSON.stringify(tc.result)}` : "";
+          return call + resultStr;
+        }
+        return call;
+      })
       .join("\n");
 
     const currentTurn = `User: ${turn.user_message}\n\nAssistant: ${turn.assistant_response}\n\nTool calls:\n${tools}`;

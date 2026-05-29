@@ -14,6 +14,22 @@ Be strict — only include categories with clear, explicit signal. Casual conver
 returns empty. Exception: explicit personal preferences ("I like/enjoy/prefer X") always
 qualify as preference even if the topic is non-technical (food, colors, habits).
 
+## Memory feedback signals (in Tool calls section)
+When the turn contains tool calls to memory feedback tools, interpret them as follows:
+
+- `memory_downvote({"id": "...", "reason": "..."})` — the LLM found a memory incorrect
+  or outdated. The `reason` field describes the contradiction. Extract the CORRECT
+  version of the fact as a new memory (architecture-decision, mental-model, or
+  anti-pattern depending on content). Also extract the downvote itself as an anti-pattern
+  if the reason reveals a recurring mistake.
+
+- `memory_reinforce(...) → {"related_memories": [...]}` — the reinforced memory was
+  useful AND its neighbors (in `related_memories`) are semantically close. If the turn
+  content explains or builds on any of those neighbor topics, extract accordingly.
+
+- `memory_add_evidence({"id": "...", "evidence": "..."})` — new evidence was added to
+  an existing memory. Extract if the evidence itself is a standalone reusable fact.
+
 ## Existing categories (prefer these — match if it fits)
 - code-pattern: idiomatic snippet, recurring structure, gotcha
 - preference: stated preference for tool/style/approach/food/personal taste — any explicit "I like/prefer/enjoy X" counts
