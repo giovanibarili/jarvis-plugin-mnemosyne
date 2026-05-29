@@ -74,16 +74,40 @@ export function formatWorkflowHit(hit: WorkflowHitFormatInput): string {
  * advertise a tool the user has no reason to call.
  */
 export function buildHint(hits: RetrievalHit[]): string {
-  const hasRelations = hits.some(
+  const hitsWithRelations = hits.filter(
     (h) => h.neighborhood && (h.neighborhood.parents.length > 0 || h.neighborhood.children.length > 0)
   );
-  // Navigation hint: ↑/↓ relations are unloaded knowledge nodes.
-  // Placed before the response so the LLM fetches them BEFORE answering.
-  const navHint = hasRelations
-    ? "\n\n**[SHOULD before responding]** The ↑/↓ entries above are knowledge nodes NOT yet loaded. Call `memory_fetch(id)` on any that seem relevant to enrich your answer before replying."
-    : "";
-  // Feedback reminder: always after responding.
-  // Co-located with memories so the LLM doesn't miss it 52k chars away in the system prompt.
+
+  // Build a contextual navigation hint. The goal is NOT to force a tool call —
+  // it is to help the LLM reason about whether deeper knowledge would improve
+  // the answer. Each graph hit shows what the unloaded neighbors are about,
+  // so the LLM can decide: "does my answer need that context?"
+  let navHint = "";
+  if (hitsWithRelations.length > 0) {
+    // Summarise what kinds of knowledge live in the unloaded ↑/↓ nodes so the
+    // LLM can make an informed decision about whether to fetch them.
+    const graphHitsWithRelations = hitsWithRelations.filter((h) => h.source === "graph");
+    if (graphHitsWithRelations.length > 0) {
+      const lines = graphHitsWithRelations.map((h) => {
+        const parentTitles = h.neighborhood!.parents.slice(0, 2).map((p) => `"${p.title}"`).join(", ");
+        const childTitles  = h.neighborhood!.children.slice(0, 2).map((c) => `"${c.title}"`).join(", ");
+        const related = [parentTitles, childTitles].filter(Boolean).join(" · ");
+        const reinf = h.memory.reinforcements ?? 0;
+        const proven = reinf >= 5 ? ` (proven useful — reinf ${reinf})` : "";
+        return `  • "${h.memory.title}"${proven} → neighbors: ${related || "see ↑/↓ above"}`;
+      });
+      navHint =
+        `\n\n**[Knowledge graph — decide before responding]**\n` +
+        `The ◦ graph hits above are entry points into deeper knowledge. Their unloaded neighbors may contain the context needed for a complete answer.\n` +
+        `If your answer would benefit from knowing more about any of these topics, call \`memory_fetch(id)\` to load the full node + evidence + 2-level neighborhood:\n` +
+        lines.join("\n");
+    } else {
+      navHint =
+        "\n\n**[Knowledge graph]** The ↑/↓ entries above are unloaded nodes. If they seem relevant to your answer, call `memory_fetch(id)` to load the full context before responding.";
+    }
+  }
+
+  // Feedback reminder — always MUST after responding.
   const feedbackReminder =
     hits.length > 0
       ? "\n\n**[MUST after responding]** Call `memory_reinforce(id)` for every memory above that was directly useful. Pass the full `id:` at the bottom of each entry."
