@@ -73,46 +73,65 @@ export function formatWorkflowHit(hit: WorkflowHitFormatInput): string {
  * Returns "" when nothing in the block has relations — we don't want to
  * advertise a tool the user has no reason to call.
  */
-export function buildHint(hits: RetrievalHit[]): string {
-  const hitsWithRelations = hits.filter(
-    (h) => h.neighborhood && (h.neighborhood.parents.length > 0 || h.neighborhood.children.length > 0)
-  );
+export function buildHint(hits: RetrievalHit[], totalPool = 0): string {
+  if (hits.length === 0) return "";
 
-  // Build a contextual navigation hint. The goal is NOT to force a tool call —
-  // it is to help the LLM reason about whether deeper knowledge would improve
-  // the answer. Each graph hit shows what the unloaded neighbors are about,
-  // so the LLM can decide: "does my answer need that context?"
-  let navHint = "";
-  if (hitsWithRelations.length > 0) {
-    // Summarise what kinds of knowledge live in the unloaded ↑/↓ nodes so the
-    // LLM can make an informed decision about whether to fetch them.
-    const graphHitsWithRelations = hitsWithRelations.filter((h) => h.source === "graph");
-    if (graphHitsWithRelations.length > 0) {
-      const lines = graphHitsWithRelations.map((h) => {
-        const parentTitles = h.neighborhood!.parents.slice(0, 2).map((p) => `"${p.title}"`).join(", ");
-        const childTitles  = h.neighborhood!.children.slice(0, 2).map((c) => `"${c.title}"`).join(", ");
-        const related = [parentTitles, childTitles].filter(Boolean).join(" · ");
-        const reinf = h.memory.reinforcements ?? 0;
-        const proven = reinf >= 5 ? ` (proven useful — reinf ${reinf})` : "";
-        return `  • "${h.memory.title}"${proven} → neighbors: ${related || "see ↑/↓ above"}`;
-      });
-      navHint =
-        `\n\n**[Knowledge graph — decide before responding]**\n` +
-        `The ◦ graph hits above are entry points into deeper knowledge. Their unloaded neighbors may contain the context needed for a complete answer.\n` +
-        `If your answer would benefit from knowing more about any of these topics, call \`memory_fetch(id)\` to load the full node + evidence + 2-level neighborhood:\n` +
-        lines.join("\n");
-    } else {
-      navHint =
-        "\n\n**[Knowledge graph]** The ↑/↓ entries above are unloaded nodes. If they seem relevant to your answer, call `memory_fetch(id)` to load the full context before responding.";
-    }
+  // ── Iceberg summary ────────────────────────────────────────────────────────
+  // Count unloaded graph nodes (↑/↓ relations) across all injected hits.
+  // This tells the LLM that the injected block is a SAMPLE, not the full picture.
+  const injectedIds = new Set(hits.map((h) => h.memory.id));
+  let unloadedNodeCount = 0;
+  let unloadedEdgeCount = 0;
+  for (const h of hits) {
+    if (!h.neighborhood) continue;
+    const unloadedParents  = h.neighborhood.parents.filter((p) => !injectedIds.has(p.id));
+    const unloadedChildren = h.neighborhood.children.filter((c) => !injectedIds.has(c.id));
+    unloadedNodeCount += unloadedParents.length + unloadedChildren.length;
+    unloadedEdgeCount += h.neighborhood.parents.length + h.neighborhood.children.length;
   }
 
-  // Feedback reminder — always MUST after responding.
+  // Build the iceberg line: "showing N cards — X more in graph, Y total in pool"
+  const parts: string[] = [];
+  if (totalPool > hits.length) parts.push(`${totalPool - hits.length} more in the ranked pool`);
+  if (unloadedNodeCount > 0)   parts.push(`${unloadedNodeCount} unloaded graph nodes (${unloadedEdgeCount} edges visible above)`);
+  const icebergLine = parts.length > 0
+    ? `_Showing ${hits.length} cards — ${parts.join(" · ")}. Use \`memory_search(query, k=20)\` or \`memory_fetch(id)\` to go deeper._`
+    : `_Showing ${hits.length} cards from memory._`;
+
+  // ── Graph navigation hint ──────────────────────────────────────────────────
+  const graphHitsWithRelations = hits.filter(
+    (h) => h.source === "graph" &&
+           h.neighborhood &&
+           (h.neighborhood.parents.length > 0 || h.neighborhood.children.length > 0)
+  );
+
+  let navHint = "";
+  if (graphHitsWithRelations.length > 0) {
+    const lines = graphHitsWithRelations.map((h) => {
+      const unloadedParents  = h.neighborhood!.parents.filter((p) => !injectedIds.has(p.id));
+      const unloadedChildren = h.neighborhood!.children.filter((c) => !injectedIds.has(c.id));
+      const neighborTitles = [
+        ...unloadedParents.slice(0, 2).map((p) => `"${p.title}"`),
+        ...unloadedChildren.slice(0, 2).map((c) => `"${c.title}"`),
+      ].join(", ");
+      const reinf = h.memory.reinforcements ?? 0;
+      const proven = reinf >= 5 ? ` ★reinf:${reinf}` : "";
+      const total = unloadedParents.length + unloadedChildren.length;
+      return `  • [${h.memory.id}] "${h.memory.title}"${proven} — ${total} unloaded neighbors: ${neighborTitles || "see ↑/↓"}`;
+    });
+    navHint =
+      `\n\n**[Knowledge graph]** These ◦ graph cards are entry points — each has unloaded neighbors that may contain the detail your answer needs.\n` +
+      `If going deeper would improve your response, call \`memory_fetch(id)\` before answering:\n` +
+      lines.join("\n");
+  } else if (hits.some((h) => h.neighborhood && (h.neighborhood.parents.length + h.neighborhood.children.length) > 0)) {
+    navHint = "\n\n**[Knowledge graph]** The ↑/↓ entries above point to unloaded nodes. Call `memory_fetch(id)` if deeper context would improve your answer.";
+  }
+
+  // ── Feedback reminder ──────────────────────────────────────────────────────
   const feedbackReminder =
-    hits.length > 0
-      ? "\n\n**[MUST after responding]** Call `memory_reinforce(id)` for every memory above that was directly useful. Pass the full `id:` at the bottom of each entry."
-      : "";
-  return navHint + feedbackReminder;
+    "\n\n**[MUST after responding]** Call `memory_reinforce(id)` for every memory above that was directly useful. Pass the full `id:` at the bottom of each entry.";
+
+  return `\n${icebergLine}` + navHint + feedbackReminder;
 }
 
 export interface RetrieverOptions {
@@ -728,16 +747,10 @@ export class RetrieverPiece {
     }
 
     // v1.3 — hint when any hit has relations
-    const hint = buildHint(hits);
+    const hint = buildHint(hits, totalPool);
     if (hint) lines.push(hint);
 
-    // Pool hint — tells the LLM how many memories were in the rerank pool
-    // vs how many were injected, and how to retrieve more.
-    if (totalPool > 0 && totalPool > hits.length) {
-      lines.push(
-        `\n_Showing ${hits.length} of ${totalPool} ranked memories. To retrieve more, call \`memory_search(query, k=20)\` with a higher k._`,
-      );
-    }
+    // Pool hint is now included in buildHint.
 
     return lines.join("\n");
   }
