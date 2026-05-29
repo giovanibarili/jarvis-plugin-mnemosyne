@@ -39,7 +39,40 @@ export function buildMemoryReinforce(
         return { ok: false, error: `Memory not found: ${args.id}` };
       }
       await store.incrementReinforcements(mem.id);
-      return { ok: true, id: mem.id, reinforcements: mem.reinforcements + 1 };
+
+      // Return top-10 vector neighbors of the reinforced memory so the LLM
+      // can decide whether to fetch any of them for deeper context.
+      // Uses the memory's own content as the query — finds semantically related
+      // memories without requiring the LLM to rephrase.
+      const neighbors: Array<{ id: string; title: string; sim: number; category: string }> = [];
+      try {
+        const layer = mem.promoted_at ? "long" : "short";
+        const hits = await store.chroma.query(layer, mem.content, 11); // 11 = self + 10
+        for (const h of hits) {
+          if (h.id === mem.id) continue; // skip self
+          const neighbor = await store.markdownStore.read(h.id);
+          if (!neighbor) continue;
+          neighbors.push({
+            id: neighbor.id,
+            title: neighbor.title,
+            sim: parseFloat((1 - h.distance).toFixed(3)),
+            category: neighbor.category,
+          });
+          if (neighbors.length >= 10) break;
+        }
+      } catch {
+        // Chroma unavailable — return reinforcement without neighbors
+      }
+
+      return {
+        ok: true,
+        id: mem.id,
+        reinforcements: mem.reinforcements + 1,
+        ...(neighbors.length > 0 ? {
+          related_memories: neighbors,
+          _hint: "Use memory_fetch(id) on any related memory above if it would enrich your answer.",
+        } : {}),
+      };
     },
   };
 }
