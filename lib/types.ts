@@ -181,6 +181,13 @@ export interface RetrievalHit {
   matchSnippet?: MatchSnippet;
   /** v1.3: Graph neighborhood (parents + children) for this memory. */
   neighborhood?: MemoryNeighborhood;
+  /**
+   * v1.3.1 — for `source: "graph"` hits, the id of the vector seed that
+   * pulled this memory in via `oneHopNeighbors`. Used by `selectTopHits` to
+   * drop graph hits whose seed didn't survive the topVector slicing.
+   * Spec: memory `kmp3qz` (code-pattern).
+   */
+  seedId?: string;
 }
 
 // ---- v1.2 TRIPLET types ----

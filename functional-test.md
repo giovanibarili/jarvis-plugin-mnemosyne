@@ -692,6 +692,46 @@ All scenarios assume `graph_retrieval.enabled: true` in config.
 **And** no `↑`/`↓` lines appear in context injection
 **And** `memory_fetch` tool is not registered
 
+### Scenario T13-5: Graph hits from discarded negative-sim vectors are suppressed (orphan prevention)
+
+> Regression test for the orphaned-graph-hit bug observed at 14:47 in the Groq Whisper turn:
+> Chroma returned 10 vectors → 8 hydrated → only 1 had `sim >= 0` → but all 8 were used as
+> graph seeds → 21 neighbors pulled → 4 graph hits survived into the injection without any
+> ancestry to the surviving positive vector. Spec memories: `kmp3qz`, `kiib1l`, `v2kjtk`.
+
+**Given** `graph_retrieval.enabled: true`
+**And** Chroma returns 3 vector candidates V_pos (sim 0.4), V_neg1 (sim -0.2), V_neg2 (sim -0.3)
+**And** V_neg1 has a child G1 in Neo4j (related_to)
+**And** V_neg2 has a child G2 in Neo4j (related_to)
+**And** V_pos has NO children in Neo4j
+**When** `retrieve()` runs with topK=5
+**Then** seedIds passed to `oneHopNeighbors` contain ONLY V_pos (1 seed, not 3)
+**And** the final `top` array contains exactly 1 hit (V_pos)
+**And** G1 and G2 are NOT in the final injection
+**And** log line `mnemosyne: retrieve — graph expand` reports `seedIds: 1`
+
+### Scenario T13-6: Graph hits are only retained when their seed survives MIN_VECTOR_SLOTS
+
+**Given** `graph_retrieval.enabled: true`
+**And** Chroma returns 3 positive vectors V_a (sim 0.8), V_b (sim 0.6), V_c (sim 0.5)
+**And** V_b has neighbor N_b in Neo4j; V_c has neighbor N_c in Neo4j
+**And** `topK = 3`, `MIN_VECTOR_SLOTS = 2`
+**When** `retrieve()` runs
+**Then** `topVector` contains V_a and V_b (top-2 positive)
+**And** N_b is retained (its seed V_b survived); N_c is dropped (its seed V_c was cut)
+**And** final `top` = [V_a, V_b, N_b]
+**And** every graph hit in `top` has its `seedId` present in `topVector` ids
+
+### Scenario T13-7: Zero positive-sim vectors → empty injection (no graph orphans)
+
+**Given** `graph_retrieval.enabled: true`
+**And** all Chroma candidates have `sim < 0` (e.g. unrelated query)
+**When** `retrieve()` runs
+**Then** seedIds passed to `oneHopNeighbors` is empty (skip graph expansion entirely)
+**And** the final `top` array is empty
+**And** the injected block contains no memories
+**And** log line `mnemosyne: retrieve — no positive vector hits, suppressing graph`
+
 ---
 
 ## Workflow Chroma Retrieval BDD scenarios

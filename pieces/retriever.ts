@@ -134,6 +134,75 @@ export function buildHint(hits: RetrievalHit[], totalPool = 0): string {
   return `\n${icebergLine}` + navHint + feedbackReminder;
 }
 
+/**
+ * Pick which retrieval hits are eligible to act as seeds for the Neo4j
+ * `oneHopNeighbors` graph expansion.
+ *
+ * Spec (memory `kmp3qz`, code-pattern): graph hops MUST be anchored to a
+ * positive-sim vector seed. A vector with `sim < 0` is more orthogonal than
+ * aligned with the query — using it as a seed pulls topically related but
+ * semantically irrelevant neighbors (the "orphan graph hit" failure mode
+ * observed at 14:47:48 on 2026-05-29 in the Groq Whisper turn, where 7 of 8
+ * vector candidates had negative sim and contributed 4 orphan graph hits).
+ *
+ * Returns: only `source === "vector"` hits with `vectorSim >= 0`.
+ * Graph hits and missing-sim hits are excluded — a graph hit can't seed
+ * further expansion (would explode the search), and a missing sim is treated
+ * defensively as "no semantic match proof".
+ */
+export function pickGraphSeeds(memories: RetrievalHit[]): RetrievalHit[] {
+  return memories.filter(
+    (m) => m.source === "vector" && typeof m.vectorSim === "number" && m.vectorSim >= 0,
+  );
+}
+
+/**
+ * Slot allocation for the final injection. Implements the
+ * "graph-complement" strategy from memory `kmp3qz`:
+ *
+ *   positiveVectorHits = 0  →  top = []  (nothing to inject)
+ *   positiveVectorHits ≥ 1  →  fill MIN_VECTOR_SLOTS with best positive vectors,
+ *                              then fill remaining slots with graph hits whose
+ *                              `seedId` survived into topVector
+ *
+ * The seed-ancestry check is what makes this an "orphan suppression" fix.
+ * Without it, graph hits whose seeding vector got cut off by `minVectorSlots`
+ * still survive into the injection — producing the noise the user observed
+ * (Image #2: 4 SAA/Deposit Platform hits with no relation to the surviving
+ * `vjm8fn` vector).
+ *
+ * @param reranked  Reranker output, ALL hits with `.score` set.
+ * @param opts.topK            Total slots in the final injection.
+ * @param opts.minVectorSlots  Slots reserved for positive vectors (e.g. 2).
+ */
+export function selectTopHits(
+  reranked: RetrievalHit[],
+  opts: { topK: number; minVectorSlots: number },
+): RetrievalHit[] {
+  const positiveVectorHits = reranked.filter(
+    (h) => h.source === "vector" && (h.vectorSim ?? -1) >= 0,
+  );
+  if (positiveVectorHits.length === 0) return [];
+
+  const minVectorSlots = Math.min(opts.minVectorSlots, opts.topK);
+  const topVector = positiveVectorHits.slice(0, minVectorSlots);
+  const survivingSeedIds = new Set(topVector.map((h) => h.memory.id));
+
+  const remainingSlots = opts.topK - topVector.length;
+  if (remainingSlots <= 0) return topVector;
+
+  // Graph hits keep their reranker order, but are dropped if their seed
+  // got cut. Hits without a recorded `seedId` are also dropped — they
+  // were pulled before the seedId tracking was added and can't be
+  // validated against the surviving vectors.
+  const validGraphHits = reranked.filter(
+    (h) => h.source !== "vector" && h.seedId !== undefined && survivingSeedIds.has(h.seedId),
+  );
+  const topGraph = validGraphHits.slice(0, remainingSlots);
+
+  return [...topVector, ...topGraph];
+}
+
 export interface RetrieverOptions {
   topK: number;
   graphHops: number;
@@ -477,24 +546,38 @@ export class RetrieverPiece {
     //    degraded (Neo4j down / unhealthy), we silently fall back to
     //    vector-only retrieval. The conversation still works, just without
     //    relation-based context expansion.
-    const seedIds = memories.map((m) => m.memory.id);
+    // v1.3.1 — only positive-sim vectors are eligible to seed graph expansion.
+    // See pickGraphSeeds() docstring and memory `kmp3qz` for the spec.
+    // Without this guard, negative-sim vectors that survive the soft sim
+    // threshold (minSim=-1.0 to support short queries) pull in unrelated
+    // neighbors, producing orphan graph hits in the final injection.
+    const graphSeeds = pickGraphSeeds(memories);
+    const seedIds = graphSeeds.map((m) => m.memory.id);
+    // For ancestry tracking: which positive-sim vector each graph hit came from.
+    // Built by querying Neo4j seed-by-seed so we can stamp `seedId` on hits.
     log.debug({ sessionId, hydrated: memories.length, droppedSim, droppedMem, droppedPrivacy }, "mnemosyne: retrieve — hydration done");
     log.debug({ sessionId, seedIds: seedIds.length, graphDegraded: this.store.isGraphDegraded() }, "mnemosyne: retrieve — graph expand");
     if (seedIds.length > 0 && !this.store.isGraphDegraded()) {
       try {
-        const neighbors = await this.store.neo4j.oneHopNeighbors(seedIds);
-        log.debug({ sessionId, neighbors: neighbors.length }, "mnemosyne: retrieve — graph neighbors done");
-        for (const n of neighbors) {
-          if (seen.has(n.id)) continue;
-          if (n.visibility === "private" && n.source_session !== sessionId) continue;
-          seen.add(n.id);
-          memories.push({
-            memory: n,
-            score: 0.5,
-            source: "graph",
-            matchSnippet: computeMatchSnippet(query, n),
-          });
+        // Per-seed expansion so we know which seed brought each neighbor.
+        // The batch oneHopNeighbors call would merge them and lose ancestry.
+        for (const seed of graphSeeds) {
+          const neighbors = await this.store.neo4j.oneHopNeighbors([seed.memory.id]);
+          for (const n of neighbors) {
+            if (seen.has(n.id)) continue;
+            if (n.visibility === "private" && n.source_session !== sessionId) continue;
+            seen.add(n.id);
+            memories.push({
+              memory: n,
+              score: 0.5,
+              source: "graph",
+              seedId: seed.memory.id, // ← v1.3.1: track ancestry
+              matchSnippet: computeMatchSnippet(query, n),
+            });
+          }
         }
+        const graphCount = memories.filter((m) => m.source === "graph").length;
+        log.debug({ sessionId, neighbors: graphCount }, "mnemosyne: retrieve — graph neighbors done");
       } catch (err) {
         log.error({ sessionId, err: String(err) }, "mnemosyne: oneHopNeighbors failed — vector-only");
       }
@@ -526,39 +609,32 @@ export class RetrieverPiece {
     //    This ensures the LLM always sees direct semantic matches first.
     const reranked = this.reranker.rerank(memories);
 
-    // Graph-complement strategy: reserve slots only for vector hits with
-    // positive cosine similarity (sim >= 0). A negative sim means the
-    // embedding is closer to the opposite pole than the query — no semantic
-    // relevance regardless of rerank score (conf can inflate score even for
-    // semantically unrelated hits). Negative-sim vectors fill remaining
-    // slots only after graph hits, as last resort.
+    // v1.3.1 — slot allocation extracted to pure function `selectTopHits`.
+    // Strategy (spec memory `kmp3qz`):
+    //   • Reserve up to MIN_VECTOR_SLOTS=2 slots for positive-sim vector hits.
+    //   • Fill remaining slots with graph hits whose `seedId` survived into topVector.
+    //   • No positive-sim vector → empty injection (no anchor, no relevance).
+    //   • Graph hits without seed ancestry or with cut seeds are dropped.
     const MIN_VECTOR_SLOTS = Math.min(2, this.opts.topK);
-    const positiveVectorHits = reranked.filter((h) => h.source === "vector" && (h.vectorSim ?? -1) >= 0);
-    const graphHits          = reranked.filter((h) => h.source !== "vector");
-    const negativeVectorHits = reranked.filter((h) => h.source === "vector" && (h.vectorSim ?? -1) < 0);
+    const top = selectTopHits(reranked, { topK: this.opts.topK, minVectorSlots: MIN_VECTOR_SLOTS });
 
-    const topVector = positiveVectorHits.slice(0, MIN_VECTOR_SLOTS);
+    // Observability counters for the rerank step.
+    const vectorPositive = reranked.filter((h) => h.source === "vector" && (h.vectorSim ?? -1) >= 0).length;
+    const vectorNegative = reranked.filter((h) => h.source === "vector" && (h.vectorSim ?? -1) < 0).length;
+    const graphInTop     = top.filter((h) => h.source !== "vector").length;
+    const graphOrphansDropped = reranked.filter((h) => h.source !== "vector").length - graphInTop;
 
-    // Graph is strictly a complement to vector — no vector anchor, no graph.
-    // If there are no positive-sim vector hits, graph hits have no semantic
-    // seed and would inject unrelated context. Return empty in that case.
-    const hasVectorAnchor = topVector.length > 0;
-    let top: RetrievalHit[];
-    if (!hasVectorAnchor) {
-      top = [];
+    if (top.length === 0 && vectorPositive === 0) {
       log.info({ sessionId, beforeRerank: memories.length, afterRerank: 0, reason: "no-vector-anchor" }, "mnemosyne: retrieve — no positive vector hits, suppressing graph");
     } else {
-      const remainingSlots = this.opts.topK - topVector.length;
-      // Graph hits fill remaining slots; negative vectors dropped entirely
-      const topGraph = graphHits.slice(0, remainingSlots);
-      top = [...topVector, ...topGraph];
       log.info({
         sessionId,
         beforeRerank: memories.length,
         afterRerank: top.length,
-        vectorPositive: topVector.length,
-        vectorNegative: negativeVectorHits.length,
-        graphInTop: topGraph.length,
+        vectorPositive,
+        vectorNegative,
+        graphInTop,
+        graphOrphansDropped,
       }, "mnemosyne: retrieve — rerank done");
     }
 
