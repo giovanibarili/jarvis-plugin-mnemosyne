@@ -162,6 +162,20 @@ export class Neo4jAdapter {
     }
   }
 
+  async decrementReinforcements(id: string): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(
+        `MATCH (m:Memory {id: $id})
+         SET m.reinforcements = CASE WHEN m.reinforcements > 0 THEN m.reinforcements - 1 ELSE 0 END,
+             m.last_accessed = $now`,
+        { id, now: Date.now() }
+      );
+    } finally {
+      await s.close();
+    }
+  }
+
   async oneHopNeighbors(seedIds: string[]): Promise<Memory[]> {
     const s = this.session();
     try {

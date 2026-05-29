@@ -48,6 +48,7 @@ import {
 import {
   buildMemoryReinforce,
   buildMemoryAddEvidence,
+  buildMemoryDownvote,
 } from "../lib/tools/memory-feedback.js";
 import {
   buildWorkflowListTool,
@@ -1090,6 +1091,7 @@ function registerTools(
   // These replace [mnemo:used:ID] and [mnemo:update:ID:...] inline text signals.
   reg.register(buildMemoryReinforce(store));
   reg.register(buildMemoryAddEvidence(store));
+  reg.register(buildMemoryDownvote(store));
 
   // v1.3 Graph Retrieval — memory_fetch tool (gated by config)
   // t-4 wires graphNeighborhood at bootstrap level; until that lands, we

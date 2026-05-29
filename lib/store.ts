@@ -111,6 +111,16 @@ export class MnemosyneStore {
     // source of truth for counters).
   }
 
+  async decrementReinforcements(id: string): Promise<void> {
+    if (this.graphDegraded) return;
+    try {
+      await this.neo4j.decrementReinforcements(id);
+    } catch (e) {
+      this.graphDegraded = true;
+      console.error("[mnemosyne-store] " + `neo4j decrementReinforcements failed: ${e}`);
+    }
+  }
+
   async promote(id: string): Promise<void> {
     const mem = await this.markdownStore.read(id);
     if (!mem || mem.promoted_at) return;

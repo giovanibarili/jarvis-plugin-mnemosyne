@@ -128,3 +128,68 @@ export function buildMemoryAddEvidence(
     },
   };
 }
+
+/**
+ * memory_downvote — negative feedback signal.
+ * Called when the LLM notices that a retrieved memory is incorrect,
+ * outdated, or misleading. Decrements the reinforcements counter
+ * (floor 0) and optionally records a reason in the evidence field.
+ *
+ * Use when:
+ * - A memory contradicts verified facts
+ * - A memory injected outdated context that led to a wrong assumption
+ * - A memory is about a different topic than the current one
+ */
+export function buildMemoryDownvote(store: MnemosyneStore): CapabilityDefinition {
+  return {
+    name: "memory_downvote",
+    description: [
+      "Signal that a retrieved memory was incorrect, outdated, or misleading.",
+      "Decrements the memory's reinforcements counter (floor 0), reducing its future retrieval rank.",
+      "Optionally records a reason in the evidence field for audit.",
+      "",
+      "## When to call",
+      "- A memory injected context that contradicted a verified fact",
+      "- A memory is clearly about a different topic and caused confusion",
+      "- A memory is outdated and its content is no longer accurate",
+      "",
+      "## Do NOT call for",
+      "- Memories that are simply not relevant to the current turn (use nothing)",
+      "- Memories that are partially correct (use memory_add_evidence instead)",
+    ].join("\n"),
+    input_schema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Memory id (full or 8-char suffix)" },
+        reason: {
+          type: "string",
+          description: "Why this memory was incorrect or misleading. Added to evidence for audit.",
+        },
+      },
+      required: ["id"],
+    },
+    handler: async (args: { id: string; reason?: string; __sessionId?: string }) => {
+      const mem = await resolveMemoryId(store, args.id);
+      if (!mem) {
+        return { ok: false, error: `Memory not found: ${args.id}` };
+      }
+      await store.decrementReinforcements(mem.id);
+      // Record the downvote reason in evidence for audit trail
+      if (args.reason) {
+        const existing = mem.evidence ?? "";
+        const note = `[DOWNVOTE] ${args.reason}`;
+        if (!existing.includes(note)) {
+          const updated = { ...mem, evidence: existing ? `${existing}\n${note}` : note };
+          await store.write(updated);
+        }
+      }
+      const newReinf = Math.max(0, (mem.reinforcements ?? 0) - 1);
+      return {
+        ok: true,
+        id: mem.id,
+        reinforcements: newReinf,
+        ...(args.reason ? { reason_recorded: true } : {}),
+      };
+    },
+  };
+}
