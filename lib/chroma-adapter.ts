@@ -92,20 +92,45 @@ export class ChromaAdapter {
     return c;
   }
 
+  /** Re-run init() to pick up new collection IDs after an external wipe. */
+  async reinit(): Promise<void> {
+    this.shortColl = undefined;
+    this.longColl = undefined;
+    this.workflowColl = undefined;
+    await this.init();
+  }
+
+  private async withCollectionRetry<T>(layer: Layer, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err: any) {
+      // Collection was deleted externally — reinit and retry once.
+      if (err?.message?.includes("does not exist") || err?.name === "InvalidCollectionError") {
+        await this.reinit();
+        return await fn();
+      }
+      throw err;
+    }
+  }
+
   async upsert(layer: Layer, input: UpsertInput): Promise<void> {
-    await this.getCollection(layer).upsert({
-      ids: [input.id],
-      documents: [input.content],
-      metadatas: [input.metadata],
-    });
+    await this.withCollectionRetry(layer, () =>
+      this.getCollection(layer).upsert({
+        ids: [input.id],
+        documents: [input.content],
+        metadatas: [input.metadata],
+      })
+    );
   }
 
   async query(layer: Layer, queryText: string, k: number, where?: Record<string, any>): Promise<QueryHit[]> {
-    const result = await this.getCollection(layer).query({
-      queryTexts: [queryText],
-      nResults: k,
-      where,
-    });
+    const result = await this.withCollectionRetry(layer, () =>
+      this.getCollection(layer).query({
+        queryTexts: [queryText],
+        nResults: k,
+        where,
+      })
+    );
     const hits: QueryHit[] = [];
     const ids = result.ids?.[0] ?? [];
     for (let i = 0; i < ids.length; i++) {
@@ -120,7 +145,9 @@ export class ChromaAdapter {
   }
 
   async delete(layer: Layer, id: string): Promise<void> {
-    await this.getCollection(layer).delete({ ids: [id] });
+    await this.withCollectionRetry(layer, () =>
+      this.getCollection(layer).delete({ ids: [id] })
+    );
   }
 
   async exists(layer: Layer, id: string): Promise<boolean> {
