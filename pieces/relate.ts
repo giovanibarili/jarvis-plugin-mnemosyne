@@ -5,6 +5,8 @@ export interface RelatePieceCfg {
   topK: number;
   similarityThreshold: number;
   judgeCap: number;
+  /** Minimum judge confidence to write an edge. Default 0.75. */
+  minEdgeConfidence: number;
 }
 
 export interface NewMemoryEvent extends RelatePayload {
@@ -46,6 +48,9 @@ export class RelatePiece {
     for (const c of candidates) {
       const verdict = await this.deps.judge.judge(m, c);
       if (verdict.relation === "unrelated") continue;
+      // Reject low-confidence edges — they produce generic noise in the graph.
+      const minConf = this.deps.cfg.minEdgeConfidence ?? 0.75;
+      if (verdict.confidence < minConf) continue;
       const edge: CrossStoreEdge = {
         from: m.id,
         to: c.id,

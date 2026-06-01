@@ -1279,9 +1279,10 @@ async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
         );
       },
       cfg: {
-        topK: config?.relate_v12?.top_k ?? 20,
-        similarityThreshold: config?.relate_v12?.similarity_threshold ?? 0.55,
-        judgeCap: config?.relate_v12?.judge_cap_per_memory ?? 20,
+        topK: config?.relate_v12?.top_k ?? 10,
+        similarityThreshold: config?.relate_v12?.similarity_threshold ?? 0.72,
+        judgeCap: config?.relate_v12?.judge_cap_per_memory ?? 5,
+        minEdgeConfidence: config?.relate_v12?.min_edge_confidence ?? 0.75,
       },
     });
   }
