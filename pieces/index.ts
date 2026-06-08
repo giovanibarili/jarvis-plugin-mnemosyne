@@ -664,6 +664,36 @@ function registerHttpRoutes(
     }
   });
 
+  /**
+   * GET /node-by-neo4j-id?neo4jId=<integer>
+   *
+   * Resolve a Neo4j internal integer ID to the memory UUID (n.id).
+   * Used by the Graph tab when vis.js click only provides the internal node ID.
+   */
+  ctx.registerRoute("GET", `${base}/node-by-neo4j-id`, async (req: any, res: any) => {
+    try {
+      const url = new URL(req.url, "http://localhost");
+      const neo4jIdStr = url.searchParams.get("neo4jId") ?? "";
+      const neo4jId = parseInt(neo4jIdStr, 10);
+      if (isNaN(neo4jId)) return jsonResponse(res, 400, { ok: false, error: "missing or invalid neo4jId" });
+      // Use HTTP API directly (no driver dependency on integer IDs)
+      const httpResp = await fetch("http://127.0.0.1:7474/db/neo4j/tx/commit", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Basic " + Buffer.from("neo4j:neo4j").toString("base64"),
+        },
+        body: JSON.stringify({ statements: [{ statement: `MATCH (n) WHERE id(n)=${neo4jId} RETURN n.id AS memoryId LIMIT 1` }] }),
+      });
+      const data = await httpResp.json() as any;
+      const memoryId = data?.results?.[0]?.data?.[0]?.row?.[0] ?? null;
+      if (!memoryId) return jsonResponse(res, 404, { ok: false, error: "not found" });
+      jsonResponse(res, 200, { memoryId: String(memoryId) });
+    } catch (e) {
+      jsonResponse(res, 500, { ok: false, error: String(e) });
+    }
+  });
+
     /**
    * GET /search?q=<query>[&k=<topK>]
    *

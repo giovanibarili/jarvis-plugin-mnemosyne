@@ -727,20 +727,15 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
           const nodeData = net?.body?.data?.nodes?.get?.(visNodeId);
           const nodeProps = nodeData?.raw?.properties ?? nodeData?.properties ?? {};
           let id = str(nodeProps.id) ?? str(nodeProps.uuid) ?? str(nodeProps.name) ?? null;
-          // Fallback: look up by Neo4j internal ID via direct query (fire-and-forget async)
+          // Fallback: resolve via JARVIS server proxy (fire-and-forget async)
           if (!id) {
             void (async () => {
               try {
-                const resp = await fetch(`http://localhost:7474/db/neo4j/tx/commit`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa("neo4j:neo4j") },
-                  body: JSON.stringify({ statements: [{ statement: `MATCH (n) WHERE id(n)=${neo4jInternalId} RETURN n.id LIMIT 1` }] }),
-                });
+                const resp = await fetch(`${PLUGIN_BASE}/node-by-neo4j-id?neo4jId=${neo4jInternalId}`);
                 const result = await resp.json();
-                const row = result?.results?.[0]?.data?.[0]?.row?.[0];
-                if (row) {
-                  onSelect(String(row));
-                  if (onSelectNode) onSelectNode({ id: String(row), edges: [] });
+                if (result?.memoryId) {
+                  onSelect(String(result.memoryId));
+                  if (onSelectNode) onSelectNode({ id: String(result.memoryId), edges: [] });
                 }
               } catch (e) { /* ignore */ }
             })();
