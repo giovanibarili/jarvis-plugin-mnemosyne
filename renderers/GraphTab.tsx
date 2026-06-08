@@ -800,6 +800,12 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
       setRecordCount(Number(evt?.recordCount ?? 0));
       attachEdgeClick();
     });
+
+    // Also attach immediately in case CompletionEvent already fired
+    // (e.g. on filter change re-render where the network object persists).
+    // attachEdgeClick() is idempotent — net.on("click") accumulates but the
+    // debug log helps detect duplicates; acceptable given the guard above.
+    setTimeout(() => { if (!cancelled) attachEdgeClick(); }, 500);
     viz.registerOnEvent(NeoVisEvents.ErrorEvent, (evt: any) => {
       if (cancelled) return;
       setLoading(false);
