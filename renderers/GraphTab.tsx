@@ -720,12 +720,32 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
         // Node click: build full edge list and call onSelectNode
         if (evt.nodes && evt.nodes.length > 0) {
           const visNodeId = evt.nodes[0];
+          // NeoVis uses the Neo4j internal node ID as the vis.js node ID.
+          // We query Neo4j directly to resolve the memory UUID from the internal ID.
+          const neo4jInternalId = visNodeId;
+          // Try to extract id from vis DataSet first (may already have Neo4j properties)
           const nodeData = net?.body?.data?.nodes?.get?.(visNodeId);
           const nodeProps = nodeData?.raw?.properties ?? nodeData?.properties ?? {};
-          console.log("[GraphTab] nodeData keys:", Object.keys(nodeData ?? {}));
-          console.log("[GraphTab] nodeProps:", JSON.stringify(nodeProps).slice(0, 200));
-          const id = str(nodeProps.id) ?? str(nodeProps.uuid) ?? str(nodeProps.name) ?? null;
-          console.log("[GraphTab] extracted id:", id);
+          let id = str(nodeProps.id) ?? str(nodeProps.uuid) ?? str(nodeProps.name) ?? null;
+          // Fallback: look up by Neo4j internal ID via direct query (fire-and-forget async)
+          if (!id) {
+            void (async () => {
+              try {
+                const resp = await fetch(`http://localhost:7474/db/neo4j/tx/commit`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", Authorization: "Basic " + btoa("neo4j:neo4j") },
+                  body: JSON.stringify({ statements: [{ statement: `MATCH (n) WHERE id(n)=${neo4jInternalId} RETURN n.id LIMIT 1` }] }),
+                });
+                const result = await resp.json();
+                const row = result?.results?.[0]?.data?.[0]?.row?.[0];
+                if (row) {
+                  onSelect(String(row));
+                  if (onSelectNode) onSelectNode({ id: String(row), edges: [] });
+                }
+              } catch (e) { /* ignore */ }
+            })();
+            return; // early return — async path will call onSelect when ready
+          }
           if (id) {
             onSelect(id);
             if (onSelectNode) {
