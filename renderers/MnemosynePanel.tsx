@@ -242,6 +242,7 @@ export default function MnemosynePanel({ state }: Props) {
     setFetchedMemory(null);
 
     if (!selectedId) { setFetchingMemory(false); return; }
+    if (selectedId === "__resolving__") { setFetchingMemory(true); return; } // wait for real ID
     if (memories.find((m) => m.id === selectedId)) { setFetchingMemory(false); return; } // already in list
 
     setFetchingMemory(true);

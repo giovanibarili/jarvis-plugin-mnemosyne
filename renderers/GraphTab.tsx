@@ -727,19 +727,25 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
           const nodeData = net?.body?.data?.nodes?.get?.(visNodeId);
           const nodeProps = nodeData?.raw?.properties ?? nodeData?.properties ?? {};
           let id = str(nodeProps.id) ?? str(nodeProps.uuid) ?? str(nodeProps.name) ?? null;
-          // Fallback: resolve via JARVIS server proxy (fire-and-forget async)
+          // Fallback: resolve via JARVIS server proxy (synchronous-style via await)
+          // We can't await in the event handler, so we trigger a synthetic select
+          // immediately with "loading" state and resolve async.
           if (!id) {
-            void (async () => {
-              try {
-                const resp = await fetch(`${PLUGIN_BASE}/node-by-neo4j-id?neo4jId=${neo4jInternalId}`);
-                const result = await resp.json();
+            // Signal "something was clicked" immediately so the panel opens.
+            // MnemosynePanel shows "loading…" until the real fetch completes.
+            onSelect("__resolving__");
+            fetch(`${PLUGIN_BASE}/node-by-neo4j-id?neo4jId=${neo4jInternalId}`)
+              .then((r) => r.json())
+              .then((result) => {
                 if (result?.memoryId) {
                   onSelect(String(result.memoryId));
                   if (onSelectNode) onSelectNode({ id: String(result.memoryId), edges: [] });
+                } else {
+                  onSelect(null); // not found — close panel
                 }
-              } catch (e) { /* ignore */ }
-            })();
-            return; // early return — async path will call onSelect when ready
+              })
+              .catch(() => { onSelect(null); });
+            return;
           }
           if (id) {
             onSelect(id);
