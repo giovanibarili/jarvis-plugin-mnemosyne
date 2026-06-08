@@ -156,6 +156,7 @@ export default function MnemosynePanel({ state }: Props) {
   }, []);
   // Memory fetched on demand when clicked node is not in the preloaded list
   const [fetchedMemory, setFetchedMemory] = useState<Memory | null>(null);
+  const [fetchingMemory, setFetchingMemory] = useState<boolean>(false);
   const [actionStatus, setActionStatus] = useState<string>("");
   const [statsCollapsed, setStatsCollapsed] = useState<boolean>(false);
 
@@ -240,17 +241,19 @@ export default function MnemosynePanel({ state }: Props) {
     // Always clear stale fetchedMemory when selection changes
     setFetchedMemory(null);
 
-    if (!selectedId) return;
-    if (memories.find((m) => m.id === selectedId)) return; // already in list
+    if (!selectedId) { setFetchingMemory(false); return; }
+    if (memories.find((m) => m.id === selectedId)) { setFetchingMemory(false); return; } // already in list
 
+    setFetchingMemory(true);
     let cancelled = false;
     getJson(`${PLUGIN_BASE}/memory?id=${encodeURIComponent(selectedId)}`)
       .then((r: any) => {
         if (!cancelled) {
           setFetchedMemory(r?.memory ? (r.memory as Memory) : null);
+          setFetchingMemory(false);
         }
       })
-      .catch(() => { if (!cancelled) setFetchedMemory(null); });
+      .catch(() => { if (!cancelled) { setFetchedMemory(null); setFetchingMemory(false); } });
     return () => { cancelled = true; };
   }, [selectedId, memories]);
 
@@ -430,14 +433,17 @@ export default function MnemosynePanel({ state }: Props) {
           <PromptsTab />
         )}
 
-        {selected && activeTab !== "categories" ? (
+        {(selected || (selectedId && fetchingMemory)) && activeTab !== "categories" ? (
           <div style={styles.detail}>
             <div style={styles.detailHeader}>
-              <div style={styles.detailTitle}>{selected.title}</div>
+              <div style={styles.detailTitle}>
+                {selected ? selected.title : <span style={{ color: "#888", fontStyle: "italic" }}>loading…</span>}
+              </div>
               <button style={styles.closeBtn} onClick={() => setSelectedId(null)} title="Close">
                 ✕
               </button>
             </div>
+            {selected ? (<>
             <div style={styles.detailMeta}>
               <span style={styles.detailChip}>{selected.category}</span>
               {selected.project ? (
@@ -516,6 +522,7 @@ export default function MnemosynePanel({ state }: Props) {
                 created {new Date(selected.created_at).toLocaleString()}
               </span>
             </div>
+            </>) : null}
           </div>
         ) : null}
       </div>
