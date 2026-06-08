@@ -722,7 +722,10 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
           const visNodeId = evt.nodes[0];
           const nodeData = net?.body?.data?.nodes?.get?.(visNodeId);
           const nodeProps = nodeData?.raw?.properties ?? nodeData?.properties ?? {};
+          console.log("[GraphTab] nodeData keys:", Object.keys(nodeData ?? {}));
+          console.log("[GraphTab] nodeProps:", JSON.stringify(nodeProps).slice(0, 200));
           const id = str(nodeProps.id) ?? str(nodeProps.uuid) ?? str(nodeProps.name) ?? null;
+          console.log("[GraphTab] extracted id:", id);
           if (id) {
             onSelect(id);
             if (onSelectNode) {
