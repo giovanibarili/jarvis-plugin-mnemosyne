@@ -961,6 +961,12 @@ async function loadOrCreateConfig(configPath: string): Promise<any> {
  *   - Empty response → returns "" (caller validates).
  */
 function makeLLMClient(ctx: PluginContext): LLMClient {
+  // Background extraction/triage/conflict work is mechanical — pin the cheap
+  // utility model. WITHOUT this pin, sessions inherit config.model (the user's
+  // chat model). Audited 2026-06-10: 71k requests over 28 days inherited
+  // Opus/Sonnet/Fable — ~$7,282 real cost vs ~$718 if Haiku (~$6.5k waste).
+  const utilityModel =
+    (ctx.config as any)?.llm_bridge?.model ?? "claude-haiku-4-5";
   return {
     async call({ system, user }) {
       const factory = ctx.sessionFactory;
@@ -969,6 +975,8 @@ function makeLLMClient(ctx: PluginContext): LLMClient {
         label,
         basePromptOverride: system,
       });
+      // Pin BEFORE the first request — sticky survives the whole session life.
+      (session as any).setStickyModelOverride?.(utilityModel);
 
       try {
         const ac = new AbortController();
@@ -1001,8 +1009,11 @@ function makeLLMClient(ctx: PluginContext): LLMClient {
 
         if (errored) throw new Error(errored);
 
-        // claude-haiku-3-5: $0.80/MTok input, $4.00/MTok output
-        const costUsd = (inputTokens / 1_000_000) * 0.80 + (outputTokens / 1_000_000) * 4.00;
+        // claude-haiku-4-5: $1.00/MTok input, $5.00/MTok output.
+        // NOTE: approximation — assumes the pinned utility model. Before the
+        // 2026-06-10 fix this calc assumed Haiku while sessions actually ran
+        // on Opus/Fable, under-reporting cost ~15-19x and masking the leak.
+        const costUsd = (inputTokens / 1_000_000) * 1.00 + (outputTokens / 1_000_000) * 5.00;
         return { text, costUsd };
       } finally {
         session.close();
