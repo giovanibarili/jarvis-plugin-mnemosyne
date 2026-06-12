@@ -1,7 +1,7 @@
 import type { EventBus, AIRequestMessage } from "@jarvis/core";
 import type { MnemosyneStore } from "../lib/store";
 import type { Reranker } from "../lib/reranker";
-import type { RetrievalHit, MemoryNeighborhood } from "../lib/types";
+import type { RetrievalHit, MemoryNeighborhood, WorkingMemoryEntry } from "../lib/types";
 import type { SemanticRelationLinker } from "../lib/semantic-relation-linker";
 import { computeMatchSnippet } from "../lib/match-snippet.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
@@ -273,6 +273,79 @@ export class RetrieverPiece {
   /** Last retrieval hits per session — read by the context injector for timeline payload. */
   lastHits = new Map<string, RetrievalHit[]>();
 
+  // ── Working memory (T2 — amnesia) ─────────────────────────────────────────
+  // Per-session map of memory-id → WorkingMemoryEntry. Tracks injection
+  // lifecycle so forgotten memories (> AMNESIA_THRESHOLD turns since last
+  // seen) are suppressed until they re-emerge via a strong vector match.
+  private workingMemory: Map<string, Map<string, WorkingMemoryEntry>> = new Map();
+  private sessionTurnCounters: Map<string, number> = new Map();
+  private readonly AMNESIA_THRESHOLD = 10;
+
+  /**
+   * Lazily initialise and return the working-memory map for a session.
+   * Never returns undefined — creates an empty map on first access.
+   */
+  private getWorkingMemory(sessionId: string): Map<string, WorkingMemoryEntry> {
+    if (!this.workingMemory.has(sessionId)) {
+      this.workingMemory.set(sessionId, new Map());
+    }
+    return this.workingMemory.get(sessionId)!;
+  }
+
+  /** Advance the per-session turn counter and return the new value. */
+  private incrementTurn(sessionId: string): number {
+    const n = (this.sessionTurnCounters.get(sessionId) ?? 0) + 1;
+    this.sessionTurnCounters.set(sessionId, n);
+    return n;
+  }
+
+  /**
+   * Mark entries as forgotten when they haven't been seen for
+   * AMNESIA_THRESHOLD turns. Forgotten memories are excluded from the
+   * next injection but can re-emerge naturally via a high-scoring
+   * vector match.
+   */
+  private applyAmnesia(sessionId: string): void {
+    const currentTurn = this.sessionTurnCounters.get(sessionId) ?? 0;
+    const wm = this.getWorkingMemory(sessionId);
+    for (const [, entry] of wm) {
+      if (!entry.forgotten && (currentTurn - entry.lastSeenAt) > this.AMNESIA_THRESHOLD) {
+        entry.forgotten = true;
+      }
+    }
+  }
+
+  /**
+   * Called when memory_reinforce fires — resets the amnesia counter for
+   * that memory, ensuring it stays visible while the user is actively
+   * referencing it.
+   */
+  reinforceMemory(sessionId: string, memId: string): void {
+    const wm = this.getWorkingMemory(sessionId);
+    const entry = wm.get(memId);
+    if (entry) {
+      entry.lastSeenAt = this.sessionTurnCounters.get(sessionId) ?? entry.lastSeenAt;
+      entry.forgotten = false;
+    }
+  }
+
+  /**
+   * Upsert the working-memory entry for a retrieved memory.
+   * If the entry is already forgotten, re-emerging resets the forgotten flag.
+   */
+  private updateWorkingMemory(sessionId: string, memId: string, score: number): void {
+    const currentTurn = this.sessionTurnCounters.get(sessionId) ?? 0;
+    const wm = this.getWorkingMemory(sessionId);
+    const existing = wm.get(memId);
+    if (existing) {
+      existing.lastSeenAt = currentTurn;
+      existing.score = score;
+      existing.forgotten = false; // re-emergence clears amnesia
+    } else {
+      wm.set(memId, { injectedAt: currentTurn, lastSeenAt: currentTurn, score, forgotten: false });
+    }
+  }
+
 
   // ── Session-scoped retrieval stats (zeroed on boot).
   // `retrievals` counts every distinct user-message lookup (cache miss).
@@ -407,6 +480,13 @@ export class RetrieverPiece {
 
   async systemContext(sessionId?: string): Promise<string> {
     const sid = sessionId ?? "main";
+
+    // E2 — Tier 1: read declared attention state for this session.
+    // Optional chaining guards against store versions that pre-date T-05.
+    const attentionState = this.store.getAttentionState?.(sid);
+    const tier1Domains = attentionState?.active_domains ?? [];
+    const tier1Categories = attentionState?.active_categories ?? [];
+
     const lastMsg = this.lastUserMsg.get(sid);
     log.debug({ sid, hasLastMsg: !!lastMsg }, "mnemosyne: retriever.systemContext called");
     if (!lastMsg) return "";
@@ -421,16 +501,38 @@ export class RetrieverPiece {
     this._stats.retrievals++;
     const query = this.buildQuery(sid);
     log.debug({ sid, queryLen: query.length, queryPreview: query.slice(0, 80) }, "mnemosyne: retriever — querying");
-    const { hits, workflowHits, totalPool } = await this.retrieve(query, sid);
-    this._stats.hitsTotal += hits.length;
-    if (hits.length > 0) this._stats.retrievalsWithHits++;
-    log.info({ sid, hits: hits.length, workflowHits: workflowHits.length, totalPool }, "mnemosyne: retriever — retrieved");
+    const { hits: rawHits, workflowHits, totalPool } = await this.retrieve(query, sid);
+    this._stats.hitsTotal += rawHits.length;
+    if (rawHits.length > 0) this._stats.retrievalsWithHits++;
+    log.info({ sid, hits: rawHits.length, workflowHits: workflowHits.length, totalPool }, "mnemosyne: retriever — retrieved");
+
+    // E3 — Advance turn counter + apply amnesia BEFORE deciding what to inject.
+    this.incrementTurn(sid);
+    this.applyAmnesia(sid);
+
+    // E3 — Lightweight domain detection from hit tags (no extra I/O).
+    const domainFreq = new Map<string, number>();
+    for (const hit of rawHits) {
+      const tags: string[] = hit.memory.tags ?? [];
+      for (const tag of tags) {
+        if (typeof tag === "string" && tag.startsWith("domain:")) {
+          const d = tag.slice(7);
+          domainFreq.set(d, (domainFreq.get(d) ?? 0) + 1);
+        }
+      }
+    }
+    const detectedDomains = [...domainFreq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 2)
+      .map(([d]) => d);
+    const activeDomains = [...new Set([...tier1Domains, ...detectedDomains])];
+    log.debug({ sid, tier1Domains, detectedDomains, activeDomains, tier1Categories }, "mnemosyne: retriever — active attention");
 
     // #1 — Filter UNRELATED hits before formatting.
     // Filter UNRELATED vector hits: negative sim = no semantic relevance.
     // Graph hits are never filtered (pulled by explicit relation, not by sim).
     // Consistent with retrieve() slot logic: sim < 0 → not a semantic match.
-    const filteredHits = hits.filter((h) => {
+    const filteredHits = rawHits.filter((h) => {
       if (h.source === "graph" || h.vectorSim == null) return true;
       return h.vectorSim >= 0; // drop any vector with negative cosine similarity
     });
@@ -441,12 +543,45 @@ export class RetrieverPiece {
       const bv = b.vectorSim ?? -2;
       return bv - av;
     });
-    const block = this.format(sortedHits, workflowHits, totalPool);
+
+    // E4 — Separate cognitive L2 from fact hits.
+    const COGNITIVE_CATEGORIES = new Set(["reasoning-pattern", "decision-heuristic", "value-priority"]);
+    const cognitiveHits = sortedHits.filter((h) => COGNITIVE_CATEGORIES.has(h.memory.category));
+    const factHits = sortedHits.filter((h) => !COGNITIVE_CATEGORIES.has(h.memory.category));
+
+    // Working memory: update entries for every retrieved hit BEFORE amnesia filter.
+    // A high-scoring re-emerging memory clears its own forgotten flag inside
+    // updateWorkingMemory — so the amnesia filter below will immediately let it through.
+    for (const hit of sortedHits) {
+      this.updateWorkingMemory(sid, hit.memory.id, hit.score);
+    }
+
+    // E6 — Amnesia filter: skip memories already resident in working memory
+    // that have been forgotten (not seen for > AMNESIA_THRESHOLD turns).
+    // updateWorkingMemory already cleared `forgotten` for re-emerging hits
+    // (score update = fresh retrieval = re-emergence), so this filter only
+    // suppresses entries that were NOT in the current retrieval.
+    // NOTE: Since we call updateWorkingMemory above for all current hits,
+    // only hits that were in WM from a PREVIOUS turn and NOT retrieved this
+    // turn could still be forgotten. This means the amnesia filter mainly
+    // prevents ghost re-injection from the block cache — correct behaviour.
+    const amnesiaFilteredFacts = factHits.filter((hit) => {
+      const entry = this.getWorkingMemory(sid).get(hit.memory.id);
+      return !entry?.forgotten;
+    });
+    const amnesiaFilteredCognitive = cognitiveHits.filter((hit) => {
+      const entry = this.getWorkingMemory(sid).get(hit.memory.id);
+      return !entry?.forgotten;
+    });
+
+    const hits = [...amnesiaFilteredCognitive, ...amnesiaFilteredFacts];
+    const block = this.format(amnesiaFilteredFacts, workflowHits, totalPool, amnesiaFilteredCognitive, activeDomains);
     this.cache.set(sid, { lastUserMsg: lastMsg, block });
-    this.lastHits.set(sid, hits); // expose for injector timeline payload
+    this.lastHits.set(sid, rawHits); // expose for injector timeline payload
 
     // Increment reinforcements on retrieved memories (D2: retrieval-only signal).
     // Best-effort — we do not want a Neo4j hiccup to break prompt construction.
+    // Only reinforce memories that survived the amnesia filter (injected hits).
     for (const hit of hits) {
       try {
         await this.store.incrementReinforcements(hit.memory.id);
@@ -752,9 +887,67 @@ export class RetrieverPiece {
     }
   }
 
-  private format(hits: RetrievalHit[], workflowHits: string[] = [], totalPool = 0): string {
-    if (!hits.length && !workflowHits.length) return "";
+  /**
+   * Build a grouped cognitive block from hits categorised as
+   * reasoning-pattern, decision-heuristic, or value-priority.
+   *
+   * Groups entries by domain (from tags) and renders three subsections:
+   * Values, Patterns, Heuristics. Prepended before the flat memory list
+   * so the LLM applies the cognitive frame before reading individual facts.
+   * Returns "" when there are no cognitive hits (no overhead for fact-only turns).
+   */
+  private buildCognitiveBlock(hits: RetrievalHit[], activeDomains: string[] = []): string {
+    if (hits.length === 0) return "";
+
+    const byDomain = new Map<string, { values: string[]; patterns: string[]; heuristics: string[] }>();
+    for (const h of hits) {
+      const tags: string[] = h.memory.tags ?? [];
+      const domainTag = tags.find((t: string) => t.startsWith("domain:"));
+      const domain = domainTag ? domainTag.slice(7) : (activeDomains[0] ?? "general");
+      if (!byDomain.has(domain)) byDomain.set(domain, { values: [], patterns: [], heuristics: [] });
+      const bucket = byDomain.get(domain)!;
+      const entry = `- **${h.memory.title}**: ${h.memory.content ?? ""}`;
+      if (h.memory.category === "value-priority")    bucket.values.push(entry);
+      else if (h.memory.category === "reasoning-pattern") bucket.patterns.push(entry);
+      else if (h.memory.category === "decision-heuristic") bucket.heuristics.push(entry);
+    }
+
     const lines: string[] = [];
+    for (const [domain, sections] of byDomain) {
+      lines.push(`\n## How Sir thinks in [${domain}] (active cognitive context)`);
+      if (sections.values.length > 0) {
+        lines.push("**Values**:");
+        lines.push(...sections.values);
+      }
+      if (sections.patterns.length > 0) {
+        lines.push("**Patterns**:");
+        lines.push(...sections.patterns);
+      }
+      if (sections.heuristics.length > 0) {
+        lines.push("**Heuristics**:");
+        lines.push(...sections.heuristics);
+      }
+    }
+    return lines.join("\n");
+  }
+
+  private format(
+    hits: RetrievalHit[],
+    workflowHits: string[] = [],
+    totalPool = 0,
+    cognitiveHits: RetrievalHit[] = [],
+    activeDomains: string[] = [],
+  ): string {
+    if (!hits.length && !workflowHits.length && !cognitiveHits.length) return "";
+    const lines: string[] = [];
+
+    // E5 — Cognitive block first so the LLM applies the thinking frame
+    // before reading individual fact memories.
+    const cognitiveBlock = this.buildCognitiveBlock(cognitiveHits, activeDomains);
+    if (cognitiveBlock) {
+      lines.push(cognitiveBlock);
+      if (hits.length || workflowHits.length) lines.push(""); // blank separator
+    }
 
     // Compact format — legend and signal guide live in the static system prompt
     // (gatedRetrieverPiece.systemContext). The ephemeral block uses the same
