@@ -5,6 +5,8 @@ import type { Neo4jAdapter } from "../lib/neo4j-adapter";
 import type { Logger } from "../lib/logger";
 import type { EncoderPiece } from "./encoder";
 import type { RetrieverPiece } from "./retriever";
+import type { ConsolidatorPiece } from "./consolidator";
+import type { BackgroundReviewPiece } from "./background-review";
 import { buildStats } from "../lib/stats";
 
 /**
@@ -59,14 +61,23 @@ export class PanelPiece implements Piece {
     // the Haiku-maintained skip-buckets.json. Injected so tests can point
     // at a temp dir.
     private rootDir: string = `${process.env.HOME}/.jarvis/mnemosyne`,
+    private consolidator?: ConsolidatorPiece,
+    private backgroundReview?: BackgroundReviewPiece,
   ) {}
 
   /** Late binding for stats sources. Called by pieces/index.ts after both
    *  the encoder and retriever instances exist. Safe to call multiple times
    *  (last write wins) — bootstrap is single-threaded. */
-  setStatsSources(encoder: EncoderPiece, retriever: RetrieverPiece): void {
+  setStatsSources(
+    encoder: EncoderPiece,
+    retriever: RetrieverPiece,
+    consolidator?: ConsolidatorPiece,
+    backgroundReview?: BackgroundReviewPiece,
+  ): void {
     this.encoder = encoder;
     this.retriever = retriever;
+    if (consolidator) this.consolidator = consolidator;
+    if (backgroundReview) this.backgroundReview = backgroundReview;
   }
 
   async start(bus: EventBus): Promise<void> {
@@ -154,6 +165,65 @@ export class PanelPiece implements Piece {
       console.warn(`[mnemosyne-panel] buildStats failed: ${String(e)}`);
     }
 
+    // Hermes v2: build retriever tier stats (per-session WM + attention)
+    let retrieverTiers = null;
+    try {
+      if (this.retriever) {
+        const sessions: Record<string, any> = {};
+        const wm = (this.retriever as any).workingMemory as Map<string, Map<string, any>> | undefined;
+        const counters = (this.retriever as any).sessionTurnCounters as Map<string, number> | undefined;
+        const store = this.store;
+        for (const [sid, wmMap] of (wm ?? [])) {
+          const entries = [...wmMap.values()];
+          const attn = store.getAttentionState?.(sid);
+          sessions[sid] = {
+            turnCounter: counters?.get(sid) ?? 0,
+            wmInjected: entries.filter(e => !e.forgotten).length,
+            wmForgotten: entries.filter(e => e.forgotten).length,
+            tier1Domains: attn?.active_domains ?? [],
+            tier1Categories: attn?.active_categories ?? [],
+            tier1UpdatedAt: attn?.updated_at ?? null,
+          };
+        }
+        retrieverTiers = { sessions };
+      }
+    } catch { /* best-effort */ }
+
+    // Hermes v2: build background review stats
+    let backgroundReview = null;
+    try {
+      if (this.backgroundReview) {
+        const br = this.backgroundReview as any;
+        const sessionEntries: Record<string, any> = {};
+        for (const [sid, count] of (br.turnCount ?? new Map())) {
+          sessionEntries[sid] = {
+            turnCount: count,
+            reviewEveryNTurns: br.config?.reviewEveryNTurns ?? 5,
+            hasIdleTimer: br.idleTimers?.has(sid) ?? false,
+          };
+        }
+        backgroundReview = {
+          sessions: sessionEntries,
+          activeReviews: br.activeReviews?.size ?? 0,
+          config: {
+            enabled: br.config?.enabled ?? false,
+            reviewEveryNTurns: br.config?.reviewEveryNTurns ?? 5,
+            idleTriggerMinutes: br.config?.idleTriggerMinutes ?? 5,
+          },
+          history: br._reviewHistory ?? [],
+        };
+      }
+    } catch { /* best-effort */ }
+
+    // Hermes v2: consolidator last run
+    let consolidatorLastRun = null;
+    try {
+      if (this.consolidator) {
+        const c = this.consolidator as any;
+        consolidatorLastRun = c._lastRunStats ?? null;
+      }
+    } catch { /* best-effort */ }
+
     const data = {
       memories: memories.slice(0, 100),
       stats: {
@@ -162,6 +232,9 @@ export class PanelPiece implements Piece {
         long: memories.filter((m) => m.promoted_at).length,
       },
       runtime: runtimeStats,
+      retrieverTiers,
+      backgroundReview,
+      consolidatorLastRun,
     };
 
     if (action === "add") {

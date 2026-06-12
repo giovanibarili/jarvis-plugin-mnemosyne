@@ -89,6 +89,8 @@ export class ConsolidatorPiece implements Piece {
   private bus?: EventBus;
   private unsubs: Array<() => void> = [];
   private lastActivityTs = Date.now();
+  /** Last run stats exposed to the HUD panel. */
+  _lastRunStats: { promoted: number; decayed: number; conflicts: number; merged: number; skillsPromoted: number; ranAt: number } | null = null;
 
   constructor(
     private store: MnemosyneStore,
@@ -195,6 +197,8 @@ export class ConsolidatorPiece implements Piece {
       conflicts,
       merged,
     };
+    // Persist for HUD display
+    this._lastRunStats = { ...stats, skillsPromoted: 0, ranAt: Date.now() };
     await this.logger.logConsolidation({
       outcome: "complete",
       start: startSnapshot,

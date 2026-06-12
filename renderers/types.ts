@@ -14,7 +14,11 @@ export type Category =
   | "mental-model"
   | "glossary"
   | "anti-pattern"
-  | "workflow";
+  | "workflow"
+  // Hermes v2 cognitive categories
+  | "reasoning-pattern"
+  | "decision-heuristic"
+  | "value-priority";
 
 export type Visibility = "open" | "private";
 
@@ -132,11 +136,64 @@ export interface RuntimeStats {
   bucketMapUpdatedAt: string | null;
 }
 
+// ── Hermes v2 new data shapes ────────────────────────────────────────────────
+
+/** BackgroundReviewPiece state — per session + global. */
+export interface BackgroundReviewStats {
+  sessions: Record<string, {
+    turnCount: number;
+    reviewEveryNTurns: number;
+    hasIdleTimer: boolean;
+  }>;
+  activeReviews: number;
+  config: {
+    enabled: boolean;
+    reviewEveryNTurns: number;
+    idleTriggerMinutes: number;
+  };
+  history: Array<{
+    sessionId: string;
+    turn: number;
+    l1: number;
+    l2: number;
+    edges: number;
+    savedAt: number;
+  }>;
+}
+
+/** Retriever tier state — per session. */
+export interface RetrieverTierStats {
+  sessions: Record<string, {
+    turnCounter: number;
+    wmInjected: number;
+    wmForgotten: number;
+    tier1Domains: string[];
+    tier1Categories: string[];
+    tier1UpdatedAt: number | null;
+  }>;
+}
+
+/** Consolidator last run stats. */
+export interface ConsolidatorLastRun {
+  promoted: number;
+  decayed: number;
+  conflicts: number;
+  merged: number;
+  skillsPromoted: number;
+  ranAt: number | null;
+}
+
 export interface PanelData {
   memories: Memory[];
   stats: MemoryStats;
   /** Live runtime metrics — encoder, retriever, skip buckets. */
   runtime?: RuntimeStats | null;
+  /** Hermes v2: BackgroundReview state. */
+  backgroundReview?: BackgroundReviewStats | null;
+  /** Hermes v2: Retriever tier state (working memory + attention). */
+  retrieverTiers?: RetrieverTierStats | null;
+  /** Hermes v2: Consolidator last run. */
+  consolidatorLastRun?: ConsolidatorLastRun | null;
   /** Set when the bootstrap fails or the store is unavailable. */
   error?: string;
   /** Set when preflight blocks plugin start. PreflightErrorPanel renders this. */
@@ -149,7 +206,7 @@ export interface PanelData {
   };
 }
 
-export type FilterCategory = Category | "all";
+export type FilterCategory = Category | "all" | "cognitive";
 export type FilterLayer = Layer | "all";
 
 export type ReplayDecision = "yes" | "skip" | "abort";

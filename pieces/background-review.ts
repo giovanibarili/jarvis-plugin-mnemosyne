@@ -121,6 +121,8 @@ export class BackgroundReviewPiece implements Piece {
 
   /** Qualified turns since last review, per session. */
   private turnCount: Map<string, number> = new Map();
+  /** Review history for the HUD — last 50 reviews. */
+  readonly _reviewHistory: Array<{ sessionId: string; turn: number; l1: number; l2: number; edges: number; savedAt: number }> = [];
 
   /**
    * Sessions currently under review. Triggers for sessions in this set are

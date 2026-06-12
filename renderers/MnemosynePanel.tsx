@@ -20,6 +20,9 @@ import WorkflowReplayDialog from "./WorkflowReplayDialog";
 import GraphTab from "./GraphTab";
 import PromptsTab from "./PromptsTab";
 import StatsBlock from "./StatsBlock";
+import EncoderTab from "./EncoderTab";
+import RetrieverTab from "./RetrieverTab";
+import BackgroundReviewTab from "./BackgroundReviewTab";
 import type {
   Memory,
   PanelData,
@@ -30,7 +33,7 @@ import type {
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
 
-type ActiveTab = "list" | "graph" | "categories";
+type ActiveTab = "list" | "graph" | "categories" | "encoder" | "retriever" | "review";
 
 interface Props {
   state: {
@@ -350,6 +353,34 @@ export default function MnemosynePanel({ state }: Props) {
         )}
       </div>
 
+      {/* Hermes v2: header pills for BG Review + Consolidator */}
+      <div style={styles.hermesPills}>
+        {data?.backgroundReview ? (() => {
+          const br = data.backgroundReview!;
+          const mainSession = Object.entries(br.sessions)[0];
+          const [sid, sv] = mainSession ?? ["main", { turnCount: 0, reviewEveryNTurns: 5, hasIdleTimer: false }];
+          const remaining = (sv?.reviewEveryNTurns ?? 5) - (sv?.turnCount ?? 0);
+          return (
+            <div style={styles.hermesPill} onClick={() => setActiveTab("review")} title="Click to open BG Review tab">
+              <span style={{ color: "#8866ee", marginRight: "4px" }}>⟳</span>
+              <span style={{ color: "#554488" }}>review: </span>
+              <span style={{ color: "#8866ee" }}>{sv?.turnCount ?? 0}/{sv?.reviewEveryNTurns ?? 5}</span>
+              {br.activeReviews > 0 && <span style={{ color: "#f59e0b", marginLeft: "4px" }}>● active</span>}
+              {remaining <= 0 && <span style={{ color: "#f59e0b", marginLeft: "4px" }}>pending</span>}
+            </div>
+          );
+        })() : null}
+        {data?.consolidatorLastRun && (data.consolidatorLastRun.promoted + data.consolidatorLastRun.decayed + data.consolidatorLastRun.skillsPromoted) > 0 ? (
+          <div style={styles.hermesPill}>
+            <span style={{ color: "#ccaa00", marginRight: "4px" }}>⚙</span>
+            <span style={{ color: "#886600" }}>last run: </span>
+            {data.consolidatorLastRun.promoted > 0 && <span style={{ color: "#10b981", marginRight: "4px" }}>+{data.consolidatorLastRun.promoted}</span>}
+            {data.consolidatorLastRun.decayed > 0 && <span style={{ color: "#ef4444", marginRight: "4px" }}>-{data.consolidatorLastRun.decayed}</span>}
+            {data.consolidatorLastRun.skillsPromoted > 0 && <span style={{ color: "#f59e0b" }}>↑{data.consolidatorLastRun.skillsPromoted} skills</span>}
+          </div>
+        ) : null}
+      </div>
+
       <StatsBlock
         runtime={data?.runtime}
         collapsed={statsCollapsed}
@@ -383,6 +414,37 @@ export default function MnemosynePanel({ state }: Props) {
           onClick={() => setActiveTab("categories")}
         >
           Categories
+        </button>
+        {/* Hermes v2 tabs */}
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "encoder" ? styles.tabActive : {}),
+            color: activeTab === "encoder" ? "#fff" : "#6688aa",
+          }}
+          onClick={() => setActiveTab("encoder")}
+        >
+          Encoder ✦
+        </button>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "retriever" ? styles.tabActive : {}),
+            color: activeTab === "retriever" ? "#fff" : "#6688aa",
+          }}
+          onClick={() => setActiveTab("retriever")}
+        >
+          Retriever ✦
+        </button>
+        <button
+          style={{
+            ...styles.tab,
+            ...(activeTab === "review" ? styles.tabActive : {}),
+            color: activeTab === "review" ? "#fff" : "#8866ee",
+          }}
+          onClick={() => setActiveTab("review")}
+        >
+          BG Review ✦
         </button>
       </div>
 
@@ -465,11 +527,17 @@ export default function MnemosynePanel({ state }: Props) {
             onSelectNode={handleGraphSelectNode}
             projects={projects}
           />
+        ) : activeTab === "encoder" ? (
+          <EncoderTab runtime={data?.runtime} />
+        ) : activeTab === "retriever" ? (
+          <RetrieverTab runtime={data?.runtime} tiers={data?.retrieverTiers} />
+        ) : activeTab === "review" ? (
+          <BackgroundReviewTab data={data?.backgroundReview} />
         ) : (
           <PromptsTab />
         )}
 
-        {(selected || (selectedId && fetchingMemory)) && activeTab !== "categories" ? (
+        {(selected || (selectedId && fetchingMemory)) && activeTab !== "categories" && activeTab !== "encoder" && activeTab !== "retriever" && activeTab !== "review" ? (
           <div style={styles.detail}>
             <div style={styles.detailHeader}>
               <div style={styles.detailTitle}>
@@ -725,6 +793,26 @@ const styles: Record<string, any> = {
     outline: "none",
   },
   filterCount: { fontSize: "11px", color: "#666", marginLeft: "auto" },
+  hermesPills: {
+    display: "flex",
+    gap: "8px",
+    padding: "4px 12px",
+    backgroundColor: "#09111d",
+    borderBottom: "1px solid #1a2a3a",
+    flexWrap: "wrap",
+  },
+  hermesPill: {
+    display: "flex",
+    alignItems: "center",
+    gap: "2px",
+    padding: "2px 8px",
+    borderRadius: "10px",
+    backgroundColor: "#0d0a1a",
+    border: "1px solid #5533aa44",
+    fontSize: "10px",
+    fontFamily: "monospace",
+    cursor: "pointer",
+  },
 
   body: {
     flex: 1,
