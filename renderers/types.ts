@@ -173,6 +173,26 @@ export interface RetrieverTierStats {
   }>;
 }
 
+/** Hermes-first WRITER stats — live (session) + historical (disk). */
+export interface WriterBlock {
+  session: {
+    domainCalls: number;
+    domainsCreated: number;
+    entityCalls: number;
+    entitiesCreated: number;
+    memoryWrites: number;
+    memoryRejected: number;
+    edgesCreated: number;
+    edgesFailed: number;
+    lastWriteAt: number | null;
+  } | null;
+  total: {
+    memoriesViaTool: number;
+    domains: number;
+    entities: number;
+  };
+}
+
 /** Consolidator last run stats. */
 export interface ConsolidatorLastRun {
   promoted: number;
@@ -194,6 +214,8 @@ export interface PanelData {
   retrieverTiers?: RetrieverTierStats | null;
   /** Hermes v2: Consolidator last run. */
   consolidatorLastRun?: ConsolidatorLastRun | null;
+  /** Hermes-first: WRITER stats (replaces encoder pipeline). */
+  writer?: WriterBlock | null;
   /** Set when the bootstrap fails or the store is unavailable. */
   error?: string;
   /** Set when preflight blocks plugin start. PreflightErrorPanel renders this. */

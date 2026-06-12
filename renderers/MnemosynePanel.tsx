@@ -20,9 +20,6 @@ import WorkflowReplayDialog from "./WorkflowReplayDialog";
 import GraphTab from "./GraphTab";
 import PromptsTab from "./PromptsTab";
 import StatsBlock from "./StatsBlock";
-import EncoderTab from "./EncoderTab";
-import RetrieverTab from "./RetrieverTab";
-import BackgroundReviewTab from "./BackgroundReviewTab";
 import type {
   Memory,
   PanelData,
@@ -33,7 +30,7 @@ import type {
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
 
-type ActiveTab = "list" | "graph" | "categories" | "encoder" | "retriever" | "review";
+type ActiveTab = "list" | "graph" | "categories";
 
 interface Props {
   state: {
@@ -361,7 +358,7 @@ export default function MnemosynePanel({ state }: Props) {
           const [sid, sv] = mainSession ?? ["main", { turnCount: 0, reviewEveryNTurns: 5, hasIdleTimer: false }];
           const remaining = (sv?.reviewEveryNTurns ?? 5) - (sv?.turnCount ?? 0);
           return (
-            <div style={styles.hermesPill} onClick={() => setActiveTab("review")} title="Click to open BG Review tab">
+            <div style={styles.hermesPill} title="Background review progress — see Runtime Stats">
               <span style={{ color: "#8866ee", marginRight: "4px" }}>⟳</span>
               <span style={{ color: "#554488" }}>review: </span>
               <span style={{ color: "#8866ee" }}>{sv?.turnCount ?? 0}/{sv?.reviewEveryNTurns ?? 5}</span>
@@ -383,6 +380,9 @@ export default function MnemosynePanel({ state }: Props) {
 
       <StatsBlock
         runtime={data?.runtime}
+        writer={data?.writer}
+        tiers={data?.retrieverTiers}
+        backgroundReview={data?.backgroundReview}
         collapsed={statsCollapsed}
         onToggle={() => setStatsCollapsed((v: boolean) => !v)}
       />
@@ -414,37 +414,6 @@ export default function MnemosynePanel({ state }: Props) {
           onClick={() => setActiveTab("categories")}
         >
           Categories
-        </button>
-        {/* Hermes v2 tabs */}
-        <button
-          style={{
-            ...styles.tab,
-            ...(activeTab === "encoder" ? styles.tabActive : {}),
-            color: activeTab === "encoder" ? "#fff" : "#6688aa",
-          }}
-          onClick={() => setActiveTab("encoder")}
-        >
-          Encoder ✦
-        </button>
-        <button
-          style={{
-            ...styles.tab,
-            ...(activeTab === "retriever" ? styles.tabActive : {}),
-            color: activeTab === "retriever" ? "#fff" : "#6688aa",
-          }}
-          onClick={() => setActiveTab("retriever")}
-        >
-          Retriever ✦
-        </button>
-        <button
-          style={{
-            ...styles.tab,
-            ...(activeTab === "review" ? styles.tabActive : {}),
-            color: activeTab === "review" ? "#fff" : "#8866ee",
-          }}
-          onClick={() => setActiveTab("review")}
-        >
-          BG Review ✦
         </button>
       </div>
 
@@ -527,17 +496,11 @@ export default function MnemosynePanel({ state }: Props) {
             onSelectNode={handleGraphSelectNode}
             projects={projects}
           />
-        ) : activeTab === "encoder" ? (
-          <EncoderTab runtime={data?.runtime} />
-        ) : activeTab === "retriever" ? (
-          <RetrieverTab runtime={data?.runtime} tiers={data?.retrieverTiers} />
-        ) : activeTab === "review" ? (
-          <BackgroundReviewTab data={data?.backgroundReview} />
         ) : (
           <PromptsTab />
         )}
 
-        {(selected || (selectedId && fetchingMemory)) && activeTab !== "categories" && activeTab !== "encoder" && activeTab !== "retriever" && activeTab !== "review" ? (
+        {(selected || (selectedId && fetchingMemory)) && activeTab !== "categories" ? (
           <div style={styles.detail}>
             <div style={styles.detailHeader}>
               <div style={styles.detailTitle}>

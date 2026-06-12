@@ -1,28 +1,35 @@
-import type { RuntimeStats, PipelineStepStats } from "./types";
+// renderers/StatsBlock.tsx
+//
+// Hermes-first Runtime Stats. Replaces the dead TRIPLET view
+// (triage/classify/enrich/relate/skip-reasons/categories-extracted).
+//
+// Layout (2 + 1):
+//   ┌─────────────── WRITER ──────────────┬─────── RETRIEVER ───────┐
+//   │ new_domain / new_entity / new_memory │ T1 attention            │
+//   │ writes · rejected · edges            │ T2 working memory       │
+//   │ taxonomy: domains · entities         │ T3 reactive retrieval   │
+//   └──────────────────────────────────────┴─────────────────────────┘
+//   ┌──────────────── BG REVIEW (thin strip) ───────────────────────┐
+//   │ status · per-session progress · last-run history              │
+//   └────────────────────────────────────────────────────────────────┘
+//
+// All stats reflect the REAL Hermes flow:
+//   hermes-reviewer → new_domain/new_entity/new_memory → store.write
+// There is NO eager pipeline, NO triage, NO skip buckets, NO Haiku map.
+
+import type {
+  RuntimeStats,
+  WriterBlock,
+  RetrieverTierStats,
+  BackgroundReviewStats,
+} from "./types";
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
 
-interface Props {
-  runtime: RuntimeStats | null | undefined;
-  collapsed: boolean;
-  onToggle: () => void;
-}
-
-function fmtPct(num: number, denom: number): string {
-  if (denom <= 0) return "—";
-  return `${((num / denom) * 100).toFixed(0)}%`;
-}
-
-function fmtCost(usd: number): string {
-  if (usd === 0) return "$0";
-  if (usd < 0.01) return `$${usd.toFixed(4)}`;
-  return `$${usd.toFixed(3)}`;
-}
-
-function fmtRelTime(iso: string | null): string {
-  if (!iso) return "never";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms) || ms < 0) return "—";
+function relTime(ts: number | null | undefined): string {
+  if (!ts) return "never";
+  const ms = Date.now() - ts;
+  if (ms < 0) return "—";
   const min = Math.floor(ms / 60_000);
   if (min < 1) return "just now";
   if (min < 60) return `${min}m ago`;
@@ -35,450 +42,266 @@ async function triggerRefresh(): Promise<void> {
   await fetch(`${PLUGIN_BASE}/refresh`, { method: "POST" });
 }
 
-// ── Pipeline step state ───────────────────────────────────────────────────────
-type StepState = "active" | "next" | "idle";
-
-function stepState(
-  step: "triage" | "classify" | "enrich" | "relate",
-  activeStep: "triage" | "classify" | "enrich" | "relate" | null
-): StepState {
-  if (activeStep === step) return "active";
-  if (activeStep === "triage"   && step === "classify") return "next";
-  if (activeStep === "classify" && step === "enrich")   return "next";
-  if (activeStep === "enrich"   && step === "relate")   return "next";
-  return "idle";
+interface Props {
+  runtime: RuntimeStats | null | undefined;
+  writer: WriterBlock | null | undefined;
+  tiers: RetrieverTierStats | null | undefined;
+  backgroundReview: BackgroundReviewStats | null | undefined;
+  collapsed: boolean;
+  onToggle: () => void;
 }
 
-// queue per step: only triage has a real queue (turns waiting to enter the
-// pipeline). classify = 1 if triage just passed (turn is in classify now),
-// relate = 1 if classify just passed. Both are derived from activeStep.
-function stepQueue(
-  step: "triage" | "classify" | "enrich" | "relate",
-  queueDepth: number,
-  activeStep: "triage" | "classify" | "enrich" | "relate" | null
-): number {
-  if (step === "triage")   return activeStep ? queueDepth : 0;
-  if (step === "classify") return activeStep === "classify" || activeStep === "enrich" || activeStep === "relate" ? 1 : 0;
-  if (step === "enrich")   return activeStep === "enrich" || activeStep === "relate" ? 1 : 0;
-  if (step === "relate")   return activeStep === "relate" ? 1 : 0;
-  return 0;
-}
-
-const STEP_COLORS: Record<StepState, { bar: string; label: string; bg: string; queue: string }> = {
-  active: { bar: "#10b981", label: "#10b981", bg: "#0a1f14", queue: "#10b981" },
-  next:   { bar: "#065f46", label: "#6ee7b7", bg: "#0a1a10", queue: "#6ee7b7" },
-  idle:   { bar: "#2a2a2a", label: "#555",    bg: "#111",    queue: "#444"    },
-};
-
-function PipelineTableRow({
-  step, stats, state, queue,
-}: {
-  step: "triage" | "classify" | "enrich" | "relate";
-  stats: PipelineStepStats;
-  state: StepState;
-  queue: number;
-}) {
-  const c = STEP_COLORS[state];
+export default function StatsBlock({ runtime, writer, tiers, backgroundReview, collapsed, onToggle }: Props) {
   return (
-    <div style={{ ...s.pipelineRow, backgroundColor: c.bg }}>
-      {/* left state bar */}
-      <div style={{ ...s.pipelineBar, backgroundColor: c.bar }} />
-      {/* step name */}
-      <span style={{ ...s.pipelineStepName, color: c.label }}>{step}</span>
-      {/* calls */}
-      <span style={s.pipelineCalls}>{stats.calls}×</span>
-      {/* spend */}
-      <span style={{ ...s.pipelineSpend, color: state === "idle" ? "#555" : "#10b981" }}>
-        {fmtCost(stats.costUsd)}
-      </span>
-      {/* queue badge */}
-      <div style={{
-        ...s.pipelineQueueBadge,
-        backgroundColor: queue > 0 ? (state === "active" ? "#1a2f1a" : "#1f1a0a") : "#0d0d0d",
-        color: queue > 0 ? (state === "active" ? c.queue : "#f59e0b") : "#2a2a2a",
-        border: `1px solid ${queue > 0 ? (state === "active" ? "#1a3f1a" : "#3f2f0a") : "#1a1a1a"}`,
-      }}>
-        {queue}
-      </div>
-    </div>
-  );
-}
-
-export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
-  if (!runtime) {
-    return (
-      <div style={s.wrap}>
-        <div style={s.header} onClick={onToggle}>
-          <span style={s.headerTitle}>📊 Runtime stats</span>
-          <span style={s.headerHint}>(stats unavailable)</span>
-          <button style={s.refreshBtn} onClick={(e: any) => { e.stopPropagation(); void triggerRefresh(); }}>↺</button>
-        </div>
-      </div>
-    );
-  }
-
-  const e  = runtime.encoder;
-  const r  = runtime.retriever;
-  const sb = runtime.skipBuckets;
-  const totalSkips = sb.casual + sb["no-signal"] + sb.error + sb.timeout + sb.other;
-  const activeStep = e.activeStep ?? null;
-
-  const categories = Object.entries(e.categoriesCount)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
-  const maxCat = categories.length > 0 ? categories[0][1] : 0;
-
-  return (
-    <div style={s.wrap}>
-      {/* ── Header ── */}
+    <div style={s.root}>
+      {/* Header bar */}
       <div style={s.header}>
-        <div style={s.headerLeft} onClick={onToggle}>
-          <span style={s.headerTitle}>📊 Runtime stats</span>
-          <span style={s.headerHint}>(since boot)</span>
-          <span style={s.headerToggle}>{collapsed ? "▸" : "▾"}</span>
-        </div>
-        <button style={s.refreshBtn} onClick={(ev: any) => { ev.stopPropagation(); void triggerRefresh(); }} title="Refresh">↺</button>
+        <span style={s.headerTitle}>
+          <span style={{ color: "#00cc66" }}>▦</span> Runtime stats
+          <span style={s.headerSub}>Hermes-first · tool-driven</span>
+        </span>
+        <span style={s.headerActions}>
+          <span style={s.iconBtn} onClick={() => void triggerRefresh()} title="Refresh">↻</span>
+          <span style={s.iconBtn} onClick={onToggle} title={collapsed ? "Expand" : "Collapse"}>
+            {collapsed ? "▾" : "▴"}
+          </span>
+        </span>
       </div>
 
-      {!collapsed ? (
-        <div style={s.grid}>
-
-          {/* ── ENCODER ── col 1, full height */}
-          <div style={s.card}>
-            <div style={s.cardTitle}>📥 Encoder</div>
-
-            {/* stats in one horizontal row */}
-            <div style={s.statsRow}>
-              <StatChip value={e.turnsProcessed} label="turns" color="#e0e0e0" />
-              <StatChip value={e.memoriesWritten} label="new" color="#10b981" />
-              <StatChip value={e.memoriesDeduped} label="deduped" color="#888" />
-              <StatChip value={e.turnsSkipped} label={`skipped (${fmtPct(e.turnsSkipped, e.turnsProcessed)})`} color="#f59e0b" />
-              {e.turnsErrored > 0 && <StatChip value={e.turnsErrored} label="errors" color="#ef4444" />}
-            </div>
-
-            {/* pipeline table */}
-            {e.pipeline ? (
-              <>
-                <div style={s.pipelineDivider} />
-                {/* column headers */}
-                <div style={s.pipelineHeaders}>
-                  <div style={s.pipelineBar} />
-                  <span style={{ ...s.pipelineStepName, color: "#333" }}>STEP</span>
-                  <span style={s.pipelineCalls}>CALLS</span>
-                  <span style={s.pipelineSpend}>SPEND</span>
-                  <span style={s.pipelineQueueBadge}>Q</span>
-                </div>
-                {(["triage", "classify", "enrich", "relate"] as const).map((step) => (
-                  <PipelineTableRow
-                    key={step}
-                    step={step}
-                    stats={e.pipeline![step]}
-                    state={stepState(step, activeStep)}
-                    queue={stepQueue(step, e.queueDepth, activeStep)}
-                  />
-                ))}
-                <div style={s.pipelineLegend}>
-                  Q: triage=fila entrada · classify/relate= 0 ou 1
-                </div>
-              </>
-            ) : null}
-
-            {/* footer */}
-            <div style={s.footer}>
-              <span style={s.footerHint}>{fmtCost(e.costUsd)} total</span>
-              <span style={{ ...s.badge, color: e.processing ? "#10b981" : "#555", backgroundColor: e.processing ? "#0a1f14" : "#181818" }}>
-                {e.processing ? "● processing" : "○ idle"}
-              </span>
-              {e.queueDepth > 0 && (
-                <span style={{ ...s.badge, color: "#f59e0b", backgroundColor: "#1f1a0a" }}>
-                  queue: {e.queueDepth}
-                </span>
-              )}
-            </div>
+      {collapsed ? null : (
+        <div style={s.body}>
+          {/* Row 1: WRITER | RETRIEVER */}
+          <div style={s.twoCol}>
+            <WriterSection writer={writer} />
+            <RetrieverSection runtime={runtime} tiers={tiers} />
           </div>
-
-          {/* ── RETRIEVER ── col 2 */}
-          <div style={s.card}>
-            <div style={s.cardTitle}>🎯 Retriever</div>
-            <MetricRow value={r.retrievals}           label="retrievals"        color="#e0e0e0" />
-            <MetricRow value={r.retrievalsWithHits}   label={`with hits (${fmtPct(r.retrievalsWithHits, r.retrievals)})`} color="#10b981" />
-            <MetricRow value={r.avgHits.toFixed(1)}   label="avg hits/retrieval" color="#8b5cf6" />
-            <MetricRow value={r.injectionsWithBlock}  label={`injections (${fmtPct(r.injectionsWithBlock, r.injections)})`} color="#3b82f6" />
-            <MetricRow value={r.reinforcements}       label="reinforcements"     color="#fbbf24" />
-            <div style={s.footer}>
-              <span style={s.footerHint}>
-                {r.cacheHits} cache hit{r.cacheHits === 1 ? "" : "s"} · {r.sessionsTracked} session{r.sessionsTracked === 1 ? "" : "s"}
-              </span>
-            </div>
-          </div>
-
-          {/* ── SKIP REASONS ── col 1 row 2 */}
-          <div style={s.card}>
-            <div style={s.cardTitle}>🚫 Skip reasons</div>
-            {totalSkips === 0 ? (
-              <div style={s.empty}>no skips recorded</div>
-            ) : (
-              <>
-                <BucketRow label="casual"    value={sb.casual}          max={totalSkips} color="#888" />
-                <BucketRow label="no-signal" value={sb["no-signal"]}    max={totalSkips} color="#9aa0a6" />
-                <BucketRow label="error"     value={sb.error}           max={totalSkips} color="#ef4444" />
-                <BucketRow label="timeout"   value={sb.timeout}         max={totalSkips} color="#f59e0b" />
-                <BucketRow label="other"     value={sb.other}           max={totalSkips} color="#666" />
-              </>
-            )}
-            <div style={s.footer}>
-              <span style={s.footerHint}>Haiku map: {fmtRelTime(runtime.bucketMapUpdatedAt)}</span>
-            </div>
-          </div>
-
-          {/* ── CATEGORIES ── col 2 row 2 */}
-          <div style={s.card}>
-            <div style={s.cardTitle}>🏷 Categories extracted</div>
-            {categories.length === 0 ? (
-              <div style={s.empty}>no triage data yet</div>
-            ) : (
-              categories.map(([cat, n]) => {
-                // Hermes v2: cognitive categories get distinct colors
-                const cogColors: Record<string, string> = {
-                  "reasoning-pattern": "#f59e0b",
-                  "decision-heuristic": "#f97316",
-                  "value-priority": "#a855f7",
-                };
-                const barColor = cogColors[cat] ?? "#3b82f6";
-                return <BucketRow key={cat} label={cat} value={n} max={maxCat} color={barColor} />;
-              })
-            )}
-            <div style={s.footer}>
-              <span style={s.footerHint}>
-                {e.candidatesEmitted} candidate{e.candidatesEmitted === 1 ? "" : "s"} emitted
-              </span>
-            </div>
-          </div>
-
+          {/* Row 2: BG REVIEW strip */}
+          <ReviewStrip data={backgroundReview} />
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── WRITER ────────────────────────────────────────────────────────────────────
 
-function StatChip({ value, label, color }: { value: number | string; label: string; color: string }) {
+function WriterSection({ writer }: { writer: WriterBlock | null | undefined }) {
+  const sess = writer?.session;
+  const tot = writer?.total;
   return (
-    <div style={s.statChip}>
-      <span style={{ ...s.statChipValue, color }}>{value}</span>
-      <span style={s.statChipLabel}>{label}</span>
-    </div>
-  );
-}
+    <div style={s.section}>
+      <div style={s.sectionTitle}>✍️ WRITER <span style={s.sectionHint}>new_domain · new_entity · new_memory</span></div>
 
-function MetricRow({ value, label, color }: { value: number | string; label: string; color: string }) {
-  return (
-    <div style={s.row}>
-      <span style={{ ...s.metric, color }}>{value}</span>
-      <span style={s.metricLabel}>{label}</span>
-    </div>
-  );
-}
-
-function BucketRow({ label, value, max, color }: { label: string; value: number; max: number; color: string }) {
-  const pct = max > 0 ? (value / max) * 100 : 0;
-  return (
-    <div style={s.bucketRow}>
-      <span style={s.bucketLabel}>{label}</span>
-      <div style={s.bucketBarWrap}>
-        <div style={{ ...s.bucketBar, width: `${pct}%`, backgroundColor: color }} />
+      {/* Live session counters */}
+      <div style={s.statRow}>
+        <Stat label="memories" value={sess?.memoryWrites ?? 0} color="#10b981" />
+        <Stat label="rejected" value={sess?.memoryRejected ?? 0} color={(sess?.memoryRejected ?? 0) > 0 ? "#ef4444" : "#6b7280"} />
+        <Stat label="edges" value={sess?.edgesCreated ?? 0} color="#f59e0b" />
+        {(sess?.edgesFailed ?? 0) > 0 && <Stat label="edge fail" value={sess!.edgesFailed} color="#ef4444" />}
       </div>
-      <span style={s.bucketValue}>{value}</span>
+
+      {/* Tool call breakdown */}
+      <div style={s.subTable}>
+        <ToolRow label="new_domain" calls={sess?.domainCalls ?? 0} created={sess?.domainsCreated ?? 0} color="#a855f7" />
+        <ToolRow label="new_entity" calls={sess?.entityCalls ?? 0} created={sess?.entitiesCreated ?? 0} color="#8b5cf6" />
+        <ToolRow label="new_memory" calls={(sess?.memoryWrites ?? 0) + (sess?.memoryRejected ?? 0)} created={sess?.memoryWrites ?? 0} color="#10b981" />
+      </div>
+
+      {/* Historical totals (disk) */}
+      <div style={s.taxonomyBar}>
+        <span style={s.taxItem}>⬡ <b style={{ color: "#a855f7" }}>{tot?.domains ?? 0}</b> domains</span>
+        <span style={s.taxItem}>◇ <b style={{ color: "#8b5cf6" }}>{tot?.entities ?? 0}</b> entities</span>
+        <span style={s.taxItem}>✎ <b style={{ color: "#10b981" }}>{tot?.memoriesViaTool ?? 0}</b> via tool</span>
+        <span style={s.taxLast}>last write: {relTime(sess?.lastWriteAt)}</span>
+      </div>
     </div>
   );
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
+function ToolRow({ label, calls, created, color }: { label: string; calls: number; created: number; color: string }) {
+  const noop = calls - created;
+  return (
+    <div style={s.toolRow}>
+      <span style={{ ...s.toolLabel, color }}>{label}</span>
+      <span style={s.toolCalls}>{calls}×</span>
+      <span style={s.toolMeta}>
+        {created > 0 && <span style={{ color }}>{created} new</span>}
+        {noop > 0 && <span style={{ color: "#6b7280", marginLeft: created > 0 ? "6px" : 0 }}>{noop} no-op</span>}
+        {calls === 0 && <span style={{ color: "#334455" }}>—</span>}
+      </span>
+    </div>
+  );
+}
+
+// ── RETRIEVER ─────────────────────────────────────────────────────────────────
+
+function RetrieverSection({ runtime, tiers }: { runtime: RuntimeStats | null | undefined; tiers: RetrieverTierStats | null | undefined }) {
+  const r = runtime?.retriever;
+  const sessions = Object.entries(tiers?.sessions ?? {});
+  const totalInj = sessions.reduce((a, [, v]) => a + v.wmInjected, 0);
+  const totalForg = sessions.reduce((a, [, v]) => a + v.wmForgotten, 0);
+  const activeDomains = sessions.flatMap(([, v]) => v.tier1Domains);
+
+  return (
+    <div style={s.section}>
+      <div style={s.sectionTitle}>📥 RETRIEVER <span style={s.sectionHint}>3-tier · cognitive-first</span></div>
+
+      {/* T1 — attention */}
+      <div style={s.tierLine}>
+        <span style={{ ...s.tierTag, color: "#00cc66", borderColor: "#226633" }}>T1</span>
+        <span style={s.tierLabel}>attention</span>
+        {activeDomains.length > 0 ? (
+          <span style={s.tierDomains}>{activeDomains.slice(0, 4).map((d) => <span key={d} style={s.domainPill}>⬡ {d}</span>)}</span>
+        ) : (
+          <span style={s.tierNone}>none declared</span>
+        )}
+      </div>
+
+      {/* T2 — working memory */}
+      <div style={s.tierLine}>
+        <span style={{ ...s.tierTag, color: "#cccc00", borderColor: "#665500" }}>T2</span>
+        <span style={s.tierLabel}>working mem</span>
+        <span style={s.tierVals}>
+          <b style={{ color: "#cccc00" }}>{totalInj}</b> inj
+          <span style={s.dot}>·</span>
+          <b style={{ color: totalForg > 0 ? "#ef4444" : "#446655" }}>{totalForg}</b> forgotten
+          <span style={s.dot}>·</span>
+          {sessions.length} sess
+        </span>
+      </div>
+
+      {/* T3 — reactive */}
+      <div style={s.tierLine}>
+        <span style={{ ...s.tierTag, color: "#6688aa", borderColor: "#334455" }}>T3</span>
+        <span style={s.tierLabel}>reactive</span>
+        <span style={s.tierVals}>
+          <b>{r?.retrievals ?? 0}</b> retr
+          <span style={s.dot}>·</span>
+          <b style={{ color: "#10b981" }}>{r?.retrievalsWithHits ?? 0}</b> hits
+          <span style={s.dot}>·</span>
+          <b style={{ color: "#a855f7" }}>{r?.injectionsWithBlock ?? 0}</b> cog-block
+          <span style={s.dot}>·</span>
+          <b style={{ color: "#f59e0b" }}>{r?.reinforcements ?? 0}</b> reinf
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── BG REVIEW strip ───────────────────────────────────────────────────────────
+
+function ReviewStrip({ data }: { data: BackgroundReviewStats | null | undefined }) {
+  const enabled = data?.config?.enabled ?? false;
+  const sessions = Object.entries(data?.sessions ?? {});
+  const history = data?.history ?? [];
+  const every = data?.config?.reviewEveryNTurns ?? 5;
+
+  return (
+    <div style={s.reviewStrip}>
+      <span style={s.reviewTitle}>⟳ BG REVIEW</span>
+      <span style={{ ...s.reviewStatus, color: enabled ? "#00cc66" : "#6b7280" }}>
+        {enabled ? "● auto" : "○ manual"}
+      </span>
+      <span style={s.reviewSep}>·</span>
+
+      {/* Per-session progress */}
+      {sessions.length === 0 ? (
+        <span style={s.reviewNone}>no turns counted</span>
+      ) : (
+        sessions.slice(0, 3).map(([sid, sv]) => (
+          <span key={sid} style={s.reviewSession}>
+            <span style={s.reviewSid}>{sid.split("-")[0]}</span>
+            <span style={s.reviewProg}>{sv.turnCount}/{sv.reviewEveryNTurns ?? every}</span>
+            {sv.hasIdleTimer && <span style={s.idleDot} title="idle timer armed">◷</span>}
+          </span>
+        ))
+      )}
+
+      <span style={s.reviewSpacer} />
+
+      {/* Activity count */}
+      {(data?.activeReviews ?? 0) > 0 && <span style={s.reviewActive}>● {data!.activeReviews} active</span>}
+
+      {/* Last review */}
+      {history.length > 0 ? (() => {
+        const last = history[history.length - 1];
+        return (
+          <span style={s.reviewLast}>
+            last: <b style={{ color: "#10b981" }}>{last.l1}</b>L1
+            <span style={s.dot}>·</span>
+            <b style={{ color: "#a855f7" }}>{last.l2}</b>L2
+            <span style={s.dot}>·</span>
+            <b style={{ color: "#f59e0b" }}>{last.edges}</b>e
+            <span style={s.reviewWhen}>{relTime(last.savedAt)}</span>
+          </span>
+        );
+      })() : (
+        <span style={s.reviewLast}><span style={{ color: "#334455" }}>no reviews yet</span></span>
+      )}
+    </div>
+  );
+}
+
+// ── primitives ────────────────────────────────────────────────────────────────
+
+function Stat({ label, value, color }: { label: string; value: number | string; color: string }) {
+  return (
+    <div style={s.stat}>
+      <span style={{ ...s.statVal, color }}>{value}</span>
+      <span style={s.statLabel}>{label}</span>
+    </div>
+  );
+}
 
 const s: Record<string, any> = {
-  wrap: {
-    display: "flex",
-    flexDirection: "column",
-    backgroundColor: "#141414",
-    border: "1px solid #2a2a2a",
-    borderRadius: "6px",
-    margin: "8px 12px",
-    overflow: "hidden",
-  },
-  header: {
-    display: "flex",
-    alignItems: "center",
-    padding: "6px 10px",
-    backgroundColor: "#181818",
-    borderBottom: "1px solid #222",
-    userSelect: "none",
-  },
-  headerLeft: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    flex: 1,
-    cursor: "pointer",
-  },
-  headerTitle: { fontSize: "12px", fontWeight: 600, color: "#bbb" },
-  headerHint:  { fontSize: "11px", color: "#666", flex: 1 },
-  headerToggle:{ fontSize: "11px", color: "#666" },
-  refreshBtn: {
-    background: "none", border: "none", color: "#555",
-    cursor: "pointer", fontSize: "13px", padding: "0 0 0 8px", lineHeight: 1, flexShrink: 0,
-  },
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-    gap: "8px",
-    padding: "10px",
-  },
-  card: {
-    display: "flex",
-    flexDirection: "column",
-    gap: "4px",
-    padding: "8px 10px",
-    backgroundColor: "#161616",
-    border: "1px solid #232323",
-    borderRadius: "4px",
-    minWidth: 0,
-  },
-  cardTitle: {
-    fontSize: "11px", fontWeight: 600, color: "#9aa0a6",
-    textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: "4px",
-  },
+  root: { backgroundColor: "#070b14", border: "1px solid #141f30", borderRadius: "6px", margin: "8px 12px", overflow: "hidden" },
+  header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 12px", backgroundColor: "#0a1018", borderBottom: "1px solid #141f30" },
+  headerTitle: { display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", fontWeight: 600, color: "#cdd6e0", fontFamily: "monospace" },
+  headerSub: { fontSize: "9px", color: "#446655", fontWeight: 400, marginLeft: "4px" },
+  headerActions: { display: "flex", gap: "8px" },
+  iconBtn: { cursor: "pointer", color: "#6b7280", fontSize: "12px", userSelect: "none" },
+  body: { padding: "10px 12px", display: "flex", flexDirection: "column", gap: "10px" },
+  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" },
 
-  // stats in one row
-  statsRow: {
-    display: "flex",
-    flexWrap: "wrap",
-    gap: "8px",
-    alignItems: "baseline",
-  },
-  statChip: {
-    display: "flex",
-    alignItems: "baseline",
-    gap: "3px",
-  },
-  statChipValue: {
-    fontSize: "15px",
-    fontWeight: 700,
-    fontVariantNumeric: "tabular-nums",
-  },
-  statChipLabel: {
-    fontSize: "10px",
-    color: "#555",
-  },
+  section: { display: "flex", flexDirection: "column", gap: "8px", padding: "8px", backgroundColor: "#090e18", border: "1px solid #141f30", borderRadius: "5px" },
+  sectionTitle: { fontSize: "10px", color: "#88a", textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, fontFamily: "monospace", display: "flex", alignItems: "center", gap: "6px" },
+  sectionHint: { fontSize: "8px", color: "#446655", fontWeight: 400, textTransform: "none", letterSpacing: 0 },
 
-  // pipeline table
-  pipelineDivider: {
-    height: "1px",
-    backgroundColor: "#1e1e1e",
-    margin: "6px 0 2px",
-  },
-  pipelineHeaders: {
-    display: "flex",
-    alignItems: "center",
-    gap: "0",
-    padding: "0 0 2px 0",
-  },
-  pipelineRow: {
-    display: "flex",
-    alignItems: "center",
-    borderRadius: "3px",
-    marginBottom: "2px",
-    overflow: "hidden",
-  },
-  pipelineBar: {
-    width: "3px",
-    alignSelf: "stretch",
-    flexShrink: 0,
-    minHeight: "24px",
-  },
-  pipelineStepName: {
-    fontSize: "11px",
-    fontWeight: 600,
-    width: "62px",
-    paddingLeft: "8px",
-    flexShrink: 0,
-  },
-  pipelineCalls: {
-    fontSize: "11px",
-    color: "#bbb",
-    fontVariantNumeric: "tabular-nums",
-    width: "36px",
-    textAlign: "right" as const,
-    flexShrink: 0,
-  },
-  pipelineSpend: {
-    fontSize: "11px",
-    fontVariantNumeric: "tabular-nums",
-    flex: 1,
-    textAlign: "right" as const,
-    paddingRight: "10px",
-  },
-  pipelineQueueBadge: {
-    fontSize: "11px",
-    fontWeight: 700,
-    fontVariantNumeric: "tabular-nums",
-    width: "28px",
-    textAlign: "center" as const,
-    borderRadius: "4px",
-    padding: "2px 0",
-    flexShrink: 0,
-    margin: "2px 4px",
-  },
-  pipelineLegend: {
-    fontSize: "9px",
-    color: "#2a2a2a",
-    marginTop: "2px",
-    lineHeight: 1.4,
-  },
+  statRow: { display: "flex", gap: "10px", flexWrap: "wrap" },
+  stat: { display: "flex", flexDirection: "column", alignItems: "center", minWidth: "44px" },
+  statVal: { fontFamily: "monospace", fontSize: "16px", fontWeight: 700 },
+  statLabel: { fontFamily: "monospace", fontSize: "8px", color: "#6b7280", textTransform: "uppercase" },
 
-  // metric row (Retriever)
-  row: { display: "flex", alignItems: "baseline", gap: "5px" },
-  metric: {
-    fontSize: "15px", fontWeight: 700, color: "#e0e0e0",
-    fontVariantNumeric: "tabular-nums", minWidth: "26px",
-  },
-  metricLabel: {
-    fontSize: "11px", color: "#888", flex: 1,
-    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-  },
+  subTable: { display: "flex", flexDirection: "column", gap: "2px" },
+  toolRow: { display: "flex", alignItems: "center", gap: "8px", fontFamily: "monospace", fontSize: "10px" },
+  toolLabel: { width: "84px", flexShrink: 0 },
+  toolCalls: { width: "32px", color: "#aaa", textAlign: "right" },
+  toolMeta: { flex: 1 },
 
-  // footer
-  footer: {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    marginTop: "6px",
-    paddingTop: "4px",
-    borderTop: "1px dashed #1e1e1e",
-    flexWrap: "wrap",
-  },
-  footerHint: { fontSize: "10px", color: "#555", flex: 1 },
-  badge: {
-    fontSize: "10px",
-    padding: "1px 7px",
-    borderRadius: "8px",
-  },
+  taxonomyBar: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap", paddingTop: "4px", borderTop: "1px solid #0d1520", fontFamily: "monospace", fontSize: "9px", color: "#88a" },
+  taxItem: { display: "flex", alignItems: "center", gap: "3px" },
+  taxLast: { marginLeft: "auto", color: "#446655" },
 
-  empty: { fontSize: "11px", color: "#555", fontStyle: "italic", padding: "4px 0" },
+  tierLine: { display: "flex", alignItems: "center", gap: "6px", fontFamily: "monospace", fontSize: "10px" },
+  tierTag: { fontSize: "8px", fontWeight: 700, padding: "1px 5px", borderRadius: "8px", border: "1px solid", flexShrink: 0 },
+  tierLabel: { color: "#88a", width: "78px", flexShrink: 0 },
+  tierVals: { color: "#aaa", display: "flex", alignItems: "center", gap: "3px", flexWrap: "wrap" },
+  tierDomains: { display: "flex", gap: "4px", flexWrap: "wrap" },
+  tierNone: { color: "#334455", fontStyle: "italic", fontSize: "9px" },
+  domainPill: { fontSize: "8px", color: "#a855f7", backgroundColor: "#1a0d2e", border: "1px solid #3b1d5a", padding: "0 5px", borderRadius: "8px" },
+  dot: { color: "#334455", margin: "0 2px" },
 
-  // bucket rows (Skip / Categories)
-  bucketRow: { display: "flex", alignItems: "center", gap: "6px", fontSize: "11px" },
-  bucketLabel: {
-    color: "#9aa0a6", width: "70px", overflow: "hidden",
-    textOverflow: "ellipsis", whiteSpace: "nowrap", flexShrink: 0,
-  },
-  bucketBarWrap: {
-    flex: 1, height: "6px", backgroundColor: "#1a1a1a",
-    borderRadius: "3px", overflow: "hidden", minWidth: "20px",
-  },
-  bucketBar: { height: "100%", transition: "width 0.2s ease" },
-  bucketValue: {
-    fontVariantNumeric: "tabular-nums", color: "#bbb",
-    width: "24px", textAlign: "right" as const, flexShrink: 0,
-  },
+  reviewStrip: { display: "flex", alignItems: "center", gap: "6px", padding: "6px 10px", backgroundColor: "#0d0a1a", border: "1px solid #2a1a4a", borderRadius: "5px", fontFamily: "monospace", fontSize: "10px", flexWrap: "wrap" },
+  reviewTitle: { color: "#8866ee", fontWeight: 700, letterSpacing: "0.04em" },
+  reviewStatus: { fontSize: "9px" },
+  reviewSep: { color: "#334455" },
+  reviewNone: { color: "#446655", fontStyle: "italic", fontSize: "9px" },
+  reviewSession: { display: "flex", alignItems: "center", gap: "3px", backgroundColor: "#0a1520", padding: "1px 6px", borderRadius: "8px" },
+  reviewSid: { color: "#00cc66", fontSize: "9px" },
+  reviewProg: { color: "#8866ee" },
+  idleDot: { color: "#f59e0b", fontSize: "9px" },
+  reviewSpacer: { flex: 1 },
+  reviewActive: { color: "#f59e0b", fontSize: "9px" },
+  reviewLast: { color: "#88a", display: "flex", alignItems: "center", gap: "2px" },
+  reviewWhen: { color: "#446655", marginLeft: "5px", fontSize: "9px" },
 };

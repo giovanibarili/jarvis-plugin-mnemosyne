@@ -7,6 +7,8 @@ import type { EncoderPiece } from "./encoder";
 import type { RetrieverPiece } from "./retriever";
 import type { ConsolidatorPiece } from "./consolidator";
 import type { BackgroundReviewPiece } from "./background-review";
+import type { WriterStats } from "../lib/tools/memory-primitives";
+import type { DomainCatalog, EntityCatalog } from "../lib/catalogs";
 import { buildStats } from "../lib/stats";
 
 /**
@@ -78,6 +80,16 @@ export class PanelPiece implements Piece {
     this.retriever = retriever;
     if (consolidator) this.consolidator = consolidator;
     if (backgroundReview) this.backgroundReview = backgroundReview;
+  }
+
+  /** Hermes-first WRITER sources — live counters + taxonomy catalogs. */
+  private writerStats?: WriterStats;
+  private domainCatalog?: DomainCatalog;
+  private entityCatalog?: EntityCatalog;
+  setWriterSources(stats: WriterStats, domains: DomainCatalog, entities: EntityCatalog): void {
+    this.writerStats = stats;
+    this.domainCatalog = domains;
+    this.entityCatalog = entities;
   }
 
   async start(bus: EventBus): Promise<void> {
@@ -224,6 +236,37 @@ export class PanelPiece implements Piece {
       }
     } catch { /* best-effort */ }
 
+    // Hermes-first WRITER stats — merge live in-memory counters with
+    // disk-derived historical totals.
+    let writer = null;
+    try {
+      const s = this.writerStats;
+      // Historical: memories written via the new_memory tool + taxonomy size.
+      const newMemoryCount = memories.filter((m) => (m as any).origin_tool === "new_memory").length;
+      const domainsTotal = this.domainCatalog?.list?.().length ?? 0;
+      const entitiesTotal = this.entityCatalog?.list?.().length ?? 0;
+      writer = {
+        // live (this process)
+        session: s ? {
+          domainCalls: s.domainCalls,
+          domainsCreated: s.domainsCreated,
+          entityCalls: s.entityCalls,
+          entitiesCreated: s.entitiesCreated,
+          memoryWrites: s.memoryWrites,
+          memoryRejected: s.memoryRejected,
+          edgesCreated: s.edgesCreated,
+          edgesFailed: s.edgesFailed,
+          lastWriteAt: s.lastWriteAt,
+        } : null,
+        // historical (disk)
+        total: {
+          memoriesViaTool: newMemoryCount,
+          domains: domainsTotal,
+          entities: entitiesTotal,
+        },
+      };
+    } catch { /* best-effort */ }
+
     const data = {
       memories: memories.slice(0, 100),
       stats: {
@@ -235,6 +278,7 @@ export class PanelPiece implements Piece {
       retrieverTiers,
       backgroundReview,
       consolidatorLastRun,
+      writer,
     };
 
     if (action === "add") {

@@ -64,6 +64,8 @@ import {
   buildNewDomainTool,
   buildNewEntityTool,
   buildNewMemoryTool,
+  makeWriterStats,
+  type WriterStats,
 } from "../lib/tools/memory-primitives.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
 
@@ -520,6 +522,12 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   await domainCatalog.load();
   await entityCatalog.load();
 
+  // Hermes-first WRITER stats — shared in-memory counters for the HUD.
+  const writerStats = makeWriterStats();
+  // Wire to panel so the Runtime Stats WRITER section reads live counters +
+  // disk-derived historical totals (domains/entities dirs, new_memory files).
+  panel.setWriterSources(writerStats, domainCatalog, entityCatalog);
+
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
 
@@ -541,6 +549,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     retriever,  // T-11: passed so memory_reinforce can reset amnesia counter
     domainCatalog,
     entityCatalog,
+    writerStats,
   );
 
   // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
@@ -1153,6 +1162,7 @@ function registerTools(
   retriever?: RetrieverPiece,
   domainCatalog?: DomainCatalog,
   entityCatalog?: EntityCatalog,
+  writerStats?: WriterStats,
 ): void {
   const reg = ctx.capabilityRegistry;
 
@@ -1195,13 +1205,14 @@ function registerTools(
   // the store with STRICT domain/entity validation. The graph surface is only
   // passed when the graph is healthy (inline relations need Neo4j).
   if (domainCatalog && entityCatalog) {
-    reg.register(buildNewDomainTool(domainCatalog));
-    reg.register(buildNewEntityTool(domainCatalog, entityCatalog));
+    reg.register(buildNewDomainTool(domainCatalog, writerStats));
+    reg.register(buildNewEntityTool(domainCatalog, entityCatalog, writerStats));
     reg.register(buildNewMemoryTool(
       store,
       domainCatalog,
       entityCatalog,
       state.graphDegraded ? undefined : neo4j,
+      writerStats,
     ));
   }
 

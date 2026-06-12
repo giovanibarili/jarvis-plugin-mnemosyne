@@ -42,9 +42,40 @@ function makeId(sessionId: string): string {
   return `${sessionId}-${Date.now()}-${rand}`;
 }
 
+/**
+ * Hermes-first WRITER stats — in-memory counters for the current process
+ * lifetime. The panel merges these with disk-derived historical totals.
+ * Shared singleton so all three primitive tools write to the same object.
+ */
+export interface WriterStats {
+  domainCalls: number;
+  domainsCreated: number;
+  entityCalls: number;
+  entitiesCreated: number;
+  memoryWrites: number;
+  memoryRejected: number;
+  edgesCreated: number;
+  edgesFailed: number;
+  lastWriteAt: number | null;
+}
+
+export function makeWriterStats(): WriterStats {
+  return {
+    domainCalls: 0,
+    domainsCreated: 0,
+    entityCalls: 0,
+    entitiesCreated: 0,
+    memoryWrites: 0,
+    memoryRejected: 0,
+    edgesCreated: 0,
+    edgesFailed: 0,
+    lastWriteAt: null,
+  };
+}
+
 // ── new_domain ───────────────────────────────────────────────────────────────
 
-export function buildNewDomainTool(catalog: DomainCatalog): CapabilityDefinition {
+export function buildNewDomainTool(catalog: DomainCatalog, stats?: WriterStats): CapabilityDefinition {
   return {
     name: "new_domain",
     description:
@@ -68,6 +99,7 @@ export function buildNewDomainTool(catalog: DomainCatalog): CapabilityDefinition
       }
       if (!description) return { ok: false, error: "description is required" };
       const { created } = await catalog.register(slug, description);
+      if (stats) { stats.domainCalls++; if (created) stats.domainsCreated++; }
       return { ok: true, slug, created, existed: !created };
     },
   };
@@ -78,6 +110,7 @@ export function buildNewDomainTool(catalog: DomainCatalog): CapabilityDefinition
 export function buildNewEntityTool(
   domains: DomainCatalog,
   entities: EntityCatalog,
+  stats?: WriterStats,
 ): CapabilityDefinition {
   return {
     name: "new_entity",
@@ -105,6 +138,7 @@ export function buildNewEntityTool(
         return { ok: false, error: `domain '${domain}' does not exist — call new_domain('${domain}', ...) first` };
       }
       const { created } = await entities.register(domain, slug, description);
+      if (stats) { stats.entityCalls++; if (created) stats.entitiesCreated++; }
       return { ok: true, domain, slug, created, existed: !created };
     },
   };
@@ -123,6 +157,7 @@ export function buildNewMemoryTool(
   domains: DomainCatalog,
   entities: EntityCatalog,
   graph: PrimitiveGraph | undefined,
+  stats?: WriterStats,
 ): CapabilityDefinition {
   return {
     name: "new_memory",
@@ -175,9 +210,11 @@ export function buildNewMemoryTool(
 
       // STRICT validation against the taxonomy.
       if (!domains.has(domain)) {
+        if (stats) stats.memoryRejected++;
         return { ok: false, error: `domain '${domain}' does not exist — call new_domain('${domain}', ...) first` };
       }
       if (entity && !entities.has(domain, entity)) {
+        if (stats) stats.memoryRejected++;
         return { ok: false, error: `entity '${entity}' does not exist under domain '${domain}' — call new_entity('${domain}', '${entity}', ...) first` };
       }
 
@@ -205,6 +242,7 @@ export function buildNewMemoryTool(
       };
 
       await store.write(memory);
+      if (stats) { stats.memoryWrites++; stats.lastWriteAt = now; }
 
       // Inline relations — best-effort; a failed edge does not undo the write.
       const relations = Array.isArray(args.relations) ? (args.relations as RelationInput[]) : [];
@@ -214,8 +252,10 @@ export function buildNewMemoryTool(
           try {
             await graph.createExplicitEdge(memory.id, r.to_id, r.relation, r.reason);
             edgeResults.push({ to_id: r.to_id, ok: true });
+            if (stats) stats.edgesCreated++;
           } catch (e) {
             edgeResults.push({ to_id: r.to_id, ok: false, error: String(e) });
+            if (stats) stats.edgesFailed++;
           }
         }
       }
