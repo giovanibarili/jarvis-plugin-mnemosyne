@@ -7,6 +7,8 @@ import { shouldDecay, type DecayConfig } from "../lib/decay";
 import { PendingCategoriesStore } from "../lib/v12/pending-categories-store";
 import { CategoryCatalog } from "../lib/v12/category-catalog";
 import { CategoryMergeJudge } from "../lib/v12/category-merge-judge";
+import { promises as fsPromises } from "fs";
+import { join } from "path";
 
 /** v1.2 TRIPLET pipeline knobs (opt-in). When absent, the consolidator
  * behaves exactly like v1.1: no pending-categories GC, no merge pass. */
@@ -28,6 +30,22 @@ export interface ConsolidatorPipelineConfig {
   pendingGc?: { maxAgeDays: number; minOccurrencesToKeep: number };
 }
 
+/** F2: Workflow → SKILL.md promotion knobs. */
+export interface SkillPromotionConfig {
+  /** Master switch — must be true for any promotion to happen. */
+  enabled: boolean;
+  /**
+   * A workflow memory must have at least this many reinforcements to be
+   * promoted. Default: 2. Keeps noisy or single-use workflows out of skills.
+   */
+  minReinforcements: number;
+  /**
+   * Root directory where SKILL.md files are written.
+   * Defaults to $HOME/.jarvis/skills if omitted.
+   */
+  skillsDir?: string;
+}
+
 export interface ConsolidatorConfig {
   /** Cron expression — registered in pieces/index.ts (Task 12), not here */
   cron: string;
@@ -42,6 +60,8 @@ export interface ConsolidatorConfig {
   decay: DecayConfig;
   /** Optional v1.2 TRIPLET pipeline configuration. Disabled when omitted. */
   pipeline?: ConsolidatorPipelineConfig;
+  /** Optional workflow→skill promotion configuration. Disabled when omitted. */
+  skillPromotion?: SkillPromotionConfig;
 }
 
 export interface ConsolidationStats {
@@ -137,6 +157,37 @@ export class ConsolidatorPiece implements Piece {
       }
     }
 
+    // 6. F1: Domain merge pass — checks pending categories against the
+    //    materialized catalog for near-duplicates. Log-only; swallowed on error
+    //    so it never poisons core stats. Only runs when v12 pipeline is wired
+    //    (requires pendingCategoriesPath + llm from the same config block).
+    if (this.config.pipeline?.v12_enabled) {
+      try {
+        await this.runDomainMergePass();
+      } catch (e) {
+        await this.logger.logConsolidation({
+          event: "domain_merge_pass_error",
+          error: String(e),
+        });
+      }
+    }
+
+    // 7. F2: Workflow → SKILL.md promotion. Swallowed on error — skill files
+    //    are best-effort and must not affect core consolidation.
+    if (this.config.skillPromotion?.enabled) {
+      try {
+        await this.runWorkflowSkillPromotion(
+          this.config.skillPromotion.minReinforcements ?? 2,
+          this.config.skillPromotion.skillsDir,
+        );
+      } catch (e) {
+        await this.logger.logConsolidation({
+          event: "skill_promotion_error",
+          error: String(e),
+        });
+      }
+    }
+
     const endSnapshot = await this.snapshot();
     const stats: ConsolidationStats = {
       promoted: promoted.length,
@@ -216,6 +267,189 @@ export class ConsolidatorPiece implements Piece {
           });
         }
       }
+    }
+  }
+
+  /**
+   * F1: Domain merge pass.
+   *
+   * The TRIPLET pipeline lets Haiku propose new categories freely; they land in
+   * PendingCategoriesStore. Over time the store accumulates near-duplicates
+   * (e.g. "saa" vs "simple-account-authorizer"). This pass cross-checks every
+   * pending entry against the materialized catalog and logs merge proposals via
+   * CategoryMergeJudge — the same judge used for dynamic↔dynamic merges in
+   * runV12Pipeline (5b). No mutations happen here; log-only, same as 5b today.
+   *
+   * Runs only when the v12 pipeline is configured (needs llm + paths).
+   */
+  private async runDomainMergePass(): Promise<void> {
+    const pipe = this.config.pipeline;
+    if (!pipe) return;
+
+    // Load pending store (fresh copy — not reusing the one from GC so we don't
+    // clobber in-memory state from a parallel pass).
+    const pendingStore = new PendingCategoriesStore(pipe.pendingCategoriesPath);
+    await pendingStore.load();
+    const pendingEntries = pendingStore.list();
+    if (pendingEntries.length === 0) return;
+
+    // Load the materialized catalog (seed + dynamic) to compare against.
+    const catalog = new CategoryCatalog(pipe.seedDir, pipe.dynamicDir);
+    await catalog.load();
+    const catalogEntries = catalog.list();
+    if (catalogEntries.length === 0) return;
+
+    const judge = new CategoryMergeJudge(
+      pipe.llm,
+      pipe.mergePromptPath,
+      pipe.mergeModel ?? "haiku",
+    );
+
+    // For each pending category, check it against every catalog entry.
+    // O(pending × catalog) — both sets are small in practice (< 50 each).
+    for (const pending of pendingEntries) {
+      for (const catalogEntry of catalogEntries) {
+        let verdict;
+        try {
+          verdict = await judge.judge(
+            {
+              id: pending.slug,
+              description: pending.description,
+              hint: pending.hint,
+              examples: [],
+            },
+            {
+              id: catalogEntry.id,
+              description: catalogEntry.description,
+              hint: catalogEntry.hint,
+              examples: catalogEntry.examples ?? [],
+            },
+          );
+        } catch (e) {
+          // Per-pair LLM hiccup — log and continue to next pair.
+          await this.logger.logConsolidation({
+            event: "domain_merge_pass_pair_error",
+            pending: pending.slug,
+            catalog: catalogEntry.id,
+            error: String(e),
+          });
+          continue;
+        }
+
+        if (verdict.should_merge) {
+          await this.logger.logConsolidation({
+            event: "domain_merge_proposed",
+            pending: pending.slug,
+            catalog: catalogEntry.id,
+            winner: verdict.winner,
+            loser: verdict.loser,
+            reason: verdict.reason,
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * F2: Workflow → SKILL.md promotion.
+   *
+   * Memories with category="workflow" that have accumulated sufficient
+   * reinforcements are promoted to SKILL.md files on disk. The skill system
+   * (`jarvis-plugin-skills`) picks them up from ~/.jarvis/skills/ on its next
+   * scan, making the workflow invocable via `/skill-name`.
+   *
+   * Idempotent: if the SKILL.md already exists it is skipped — re-running the
+   * consolidator will never overwrite a skill the user may have hand-edited.
+   *
+   * Why workflow memories only: category="workflow" is the canonical signal
+   * that a memory encodes a multi-step procedure worth externalizing as a
+   * reusable skill. Other high-reinforcement memories (preferences, mental
+   * models, etc.) are better kept inside Mnemosyne.
+   */
+  private async runWorkflowSkillPromotion(
+    minReinforcements: number,
+    skillsDir?: string,
+  ): Promise<void> {
+    const root =
+      skillsDir ??
+      join(process.env.HOME ?? "/tmp", ".jarvis", "skills");
+
+    // List workflow memories across both layers (short + long).
+    // Workflows may already be promoted to long-term by the promote() pass.
+    const allWorkflows = await this.store.markdownStore.list({
+      category: "workflow",
+    });
+
+    let promoted = 0;
+    for (const wf of allWorkflows) {
+      // Prefer the live reinforcements counter from Neo4j when available.
+      let reinforcements = wf.reinforcements;
+      if (!this.store.isGraphDegraded()) {
+        try {
+          const fresh = await this.store.neo4j.getMemory(wf.id);
+          if (fresh) reinforcements = fresh.reinforcements;
+        } catch {
+          // Graph hiccup — fall through to markdown value.
+        }
+      }
+
+      if (reinforcements < minReinforcements) continue;
+
+      // Derive a filesystem-safe slug from the title (max 40 chars to avoid
+      // overly long directory names on case-insensitive filesystems).
+      const slug = wf.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "")
+        .slice(0, 40);
+
+      // Use the first 12 chars of the memory id as a stable prefix so that
+      // renames in the title don't collide with existing skill dirs.
+      const dirName = `${wf.id.slice(0, 12)}-${slug}`;
+      const skillDir = join(root, dirName);
+      const skillPath = join(skillDir, "SKILL.md");
+
+      // Idempotency check — skip if already promoted.
+      try {
+        await fsPromises.access(skillPath);
+        continue; // SKILL.md exists — don't overwrite.
+      } catch {
+        // File doesn't exist — proceed to create.
+      }
+
+      await fsPromises.mkdir(skillDir, { recursive: true });
+
+      const evidenceSection = wf.evidence
+        ? `\n\n## Evidence\n\n${wf.evidence}`
+        : "";
+
+      const content =
+        `---\n` +
+        `name: ${slug}\n` +
+        `description: ${wf.title}\n` +
+        `promoted_from_memory: ${wf.id}\n` +
+        `promoted_at: ${new Date().toISOString()}\n` +
+        `---\n\n` +
+        `${wf.content}` +
+        `${evidenceSection}\n`;
+
+      await fsPromises.writeFile(skillPath, content, "utf-8");
+      promoted++;
+
+      await this.logger.logConsolidation({
+        event: "workflow_skill_promoted",
+        memory_id: wf.id,
+        title: wf.title,
+        reinforcements,
+        skill_path: skillPath,
+      });
+    }
+
+    if (promoted > 0) {
+      await this.logger.logConsolidation({
+        event: "workflow_skill_promotion_complete",
+        promoted,
+      });
     }
   }
 
