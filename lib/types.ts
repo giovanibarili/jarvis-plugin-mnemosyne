@@ -61,6 +61,10 @@ export interface Memory {
   origin_tool?: string;
   /** For tool origins: the primary reference — file path, URL, or key arg */
   origin_ref?: string;
+  /** Thematic domain this memory belongs to (mandatory at write time, slug). D4 */
+  domain?: string;
+  /** Specific named entity within the domain (optional, slug). D4 */
+  entity?: string | null;
 }
 
 export interface WorkflowStep {
@@ -237,7 +241,9 @@ export type RelateRelation =
   | "relates_to"
   | "relates_to_variant"
   | "contradicts"
-  | "unrelated";
+  | "unrelated"
+  | "same_as"    // NEW — entity/concept aliases
+  | "inherits";  // NEW — entity specialization
 
 export type RelateJudgement = {
   relation: RelateRelation;
@@ -267,4 +273,20 @@ export interface MemoryNeighborhood {
 
 export interface ExpandedChild extends RelatedMemoryRef {
   grandchildren: RelatedMemoryRef[];
+}
+
+/** Tier 1 — attention state declared by the reviewer per session. */
+export interface AttentionState {
+  active_domains: string[];
+  active_entities: string[];
+  active_categories: string[];
+  updated_at: number;
+}
+
+/** Tier 2 — working memory entry tracking injection lifecycle. */
+export interface WorkingMemoryEntry {
+  injectedAt: number;   // turn number
+  lastSeenAt: number;   // most recent injection turn
+  score: number;
+  forgotten: boolean;
 }
