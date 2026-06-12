@@ -64,6 +64,7 @@ import { buildMnemosyneStatusTool } from "../lib/tools/status-tool.js";
 import { buildMemoryFetchTool } from "../lib/tools/memory-fetch.js";
 import { buildMnemosyneTriageTool } from "../lib/tools/triage-tool.js";
 import { buildMemoryRelateTool } from "../lib/tools/memory-relate-tool.js";
+import { buildSessionAttentionTool } from "../lib/tools/session-attention-tool.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
 
 // ESM equivalent of __dirname
@@ -512,6 +513,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     config,
     relatePieceRef,
     { graphDegraded },
+    retriever,  // T-11: passed so memory_reinforce can reset amnesia counter
   );
 
   // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
@@ -1121,6 +1123,7 @@ function registerTools(
   config: any,
   relatePieceRef?: { current?: import("./relate.js").RelatePiece },
   state: { graphDegraded: boolean } = { graphDegraded: false },
+  retriever?: RetrieverPiece,
 ): void {
   const reg = ctx.capabilityRegistry;
 
@@ -1161,9 +1164,38 @@ function registerTools(
 
   // Feedback tools — explicit tool-based replacement for fragile text signals.
   // These replace [mnemo:used:ID] and [mnemo:update:ID:...] inline text signals.
-  reg.register(buildMemoryReinforce(store));
+  //
+  // T-11: memory_reinforce also resets the amnesia counter in the retriever's
+  // working memory. We wrap the base capability so the retriever learns about
+  // the reinforcement without the tool needing a direct RetrieverPiece dep.
+  {
+    const baseDef = buildMemoryReinforce(store);
+    const baseHandler = baseDef.handler!;
+    reg.register({
+      ...baseDef,
+      handler: async (args: Record<string, unknown>, meta?: { sessionId?: string }) => {
+        const result = await (baseHandler as (a: Record<string, unknown>, m?: { sessionId?: string }) => Promise<unknown>)(args, meta);
+        // Reset amnesia for this memory in the active session so the retriever
+        // keeps injecting it while the user is actively referencing it.
+        if (retriever && typeof args.id === "string") {
+          const sessionId = meta?.sessionId ?? "main";
+          retriever.reinforceMemory(sessionId, args.id);
+        }
+        return result;
+      },
+    });
+  }
   reg.register(buildMemoryAddEvidence(store));
   reg.register(buildMemoryDownvote(store));
+
+  // T-11: session_attention_update — lets BackgroundReviewPiece declare the
+  // active cognitive context after a review pass. Retriever reads this on the
+  // next turn to prioritise Tier 1 domains/categories. Store methods are bound
+  // so the tool has no direct dependency on MnemosyneStore internals.
+  reg.register(buildSessionAttentionTool(
+    store.getAttentionState.bind(store),
+    store.setAttentionState.bind(store),
+  ));
 
   // v1.3 Graph Retrieval — memory_fetch tool (gated by config)
   // t-4 wires graphNeighborhood at bootstrap level; until that lands, we
