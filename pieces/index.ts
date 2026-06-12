@@ -26,6 +26,7 @@ import { RetrieverPiece } from "./retriever.js";
 import { ConsolidatorPiece } from "./consolidator.js";
 import { PanelPiece } from "./panel.js";
 import { RelatePiece } from "./relate.js";
+import { BackgroundReviewPiece } from "./background-review.js";
 import { EncoderV12, type EncodedMemory } from "../lib/v12/encoder-v12.js";
 import { CategoryCatalog } from "../lib/v12/category-catalog.js";
 import { PendingCategoriesStore } from "../lib/v12/pending-categories-store.js";
@@ -276,12 +277,33 @@ ${block}
   // Each piece is wrapped in a gate that awaits bootstrap before delegating
   // to the real piece's start(). The wrapped piece exposes the same id/name
   // so the HUD and capability registry behave identically.
+  // T-08: BackgroundReviewPiece — periodic cognitive curation via copy-on-write fork.
+  // Reads enabled/cadence from plugin config (ctx.config.background_review).
+  // Gated on bootstrap so it only starts after the store is ready.
+  const brConfig = (ctx.config as any)?.background_review ?? {};
+  const backgroundReview = gatedPiece(
+    "mnemosyne-background-review",
+    "Mnemosyne Background Review",
+    bootstrap,
+    (b) => new BackgroundReviewPiece(
+      b.store,
+      { bus: ctx.bus, sessionManager: ctx.sessionManager },
+      {
+        enabled: brConfig.enabled ?? false,
+        reviewEveryNTurns: brConfig.reviewEveryNTurns ?? 5,
+        idleTriggerMinutes: brConfig.idleTriggerMinutes ?? 5,
+        timeoutSeconds: brConfig.timeoutSeconds ?? 60,
+      }
+    )
+  );
+
   return [
     gatedPiece("mnemosyne-observer", "Mnemosyne Observer", bootstrap, (b) => b.observer),
     gatedPiece("mnemosyne-encoder", "Mnemosyne Encoder", bootstrap, (b) => b.encoder),
     gatedRetrieverPiece(bootstrap, retrieverHandle),
     gatedPiece("mnemosyne-consolidator", "Mnemosyne Consolidator", bootstrap, (b) => b.consolidator),
     gatedPiece("mnemosyne-panel", "Mnemosyne Panel", bootstrap, (b) => b.panel),
+    backgroundReview,
   ];
 }
 
@@ -320,6 +342,8 @@ interface Bootstrap {
   panel: PanelPiece;
   /** Cached most recent block per session for sync systemContext() */
   retrieverCache: Map<string, string>;
+  /** MnemosyneStore — exposed so BackgroundReviewPiece can read AttentionState (T-08). */
+  store: MnemosyneStore;
 }
 
 async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
@@ -503,6 +527,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     consolidator,
     panel,
     retrieverCache: new Map(),
+    store,
   };
 }
 
