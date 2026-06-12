@@ -47,7 +47,18 @@ const ALL_CATEGORIES: Category[] = [
   "glossary",
   "anti-pattern",
   "workflow",
+  // Hermes v2 cognitive categories
+  "reasoning-pattern",
+  "decision-heuristic",
+  "value-priority",
 ];
+
+const COGNITIVE_CATEGORIES = new Set(["reasoning-pattern", "decision-heuristic", "value-priority"]);
+const COGNITIVE_COLORS: Record<string, string> = {
+  "reasoning-pattern": "#f59e0b",
+  "decision-heuristic": "#f97316",
+  "value-priority": "#a855f7",
+};
 
 async function postJson(path: string, body?: unknown): Promise<any> {
   try {
@@ -95,6 +106,7 @@ export default function MnemosynePanel({ state }: Props) {
   const [filterCategory, setFilterCategory] = useState<FilterCategory>("all");
   const [filterLayer, setFilterLayer] = useState<FilterLayer>("all");
   const [filterProject, setFilterProject] = useState<string>("all");
+  const [filterDomain, setFilterDomain] = useState<string>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Edges connected to the currently selected node (from graph click or Neo4j fetch)
   const [nodeEdges, setNodeEdges] = useState<import('./GraphTab').SelectedEdge[]>([]);
@@ -209,6 +221,16 @@ export default function MnemosynePanel({ state }: Props) {
     return ["all", ...Array.from(set).sort()];
   }, [memories]);
 
+  // Hermes v2: domain list from memory domain fields
+  const domains = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of memories) {
+      const d = (m as any).domain;
+      if (d) set.add(d);
+    }
+    return set.size > 0 ? ["all", ...Array.from(set).sort()] : ["all"];
+  }, [memories]);
+
   // Apply filters (category, layer, project, local search fallback)
   const filtered = useMemo(() => {
     const base = searchHits ?? memories;
@@ -218,6 +240,7 @@ export default function MnemosynePanel({ state }: Props) {
       if (filterLayer === "short" && m.promoted_at) return false;
       if (filterLayer === "long" && !m.promoted_at) return false;
       if (filterProject !== "all" && m.project !== filterProject) return false;
+      if (filterDomain !== "all" && (m as any).domain !== filterDomain) return false;
       if (!searchHits && q) {
         const hay =
           (m.title + " " + m.content + " " + (m.tags ?? []).join(" ")).toLowerCase();
@@ -393,6 +416,18 @@ export default function MnemosynePanel({ state }: Props) {
               <option key={p} value={p}>{p === "all" ? "all projects" : `@${p}`}</option>
             ))}
           </select>
+          {/* Hermes v2: domain filter */}
+          {domains.length > 1 ? (
+            <select
+              style={styles.select}
+              value={filterDomain}
+              onChange={(e: any) => setFilterDomain(e.target.value)}
+            >
+              {domains.map((d: string) => (
+                <option key={d} value={d}>{d === "all" ? "all domains" : `⬡ ${d}`}</option>
+              ))}
+            </select>
+          ) : null}
           <span style={styles.filterCount}>
             {filtered.length}/{memories.length} shown
           </span>
@@ -446,7 +481,25 @@ export default function MnemosynePanel({ state }: Props) {
             </div>
             {selected ? (<>
             <div style={styles.detailMeta}>
-              <span style={styles.detailChip}>{selected.category}</span>
+              {/* Category chip — cognitive categories get distinct color */}
+              <span style={{
+                ...styles.detailChip,
+                ...(COGNITIVE_CATEGORIES.has(selected.category) ? {
+                  color: COGNITIVE_COLORS[selected.category] ?? "#aaa",
+                  borderColor: COGNITIVE_COLORS[selected.category] ?? "#2a2a2a",
+                } : {}),
+              }}>{selected.category}</span>
+              {/* Hermes v2: domain + entity chips */}
+              {(selected as any).domain ? (
+                <span style={{ ...styles.detailChip, color: "#a855f7", borderColor: "#3b1d5a" }}>
+                  ⬡ {(selected as any).domain}
+                </span>
+              ) : null}
+              {(selected as any).entity ? (
+                <span style={{ ...styles.detailChip, color: "#8b5cf6", borderColor: "#2d1b4e" }}>
+                  ◈ {(selected as any).entity}
+                </span>
+              ) : null}
               {selected.project ? (
                 <span style={styles.detailChip}>@{selected.project}</span>
               ) : null}
@@ -479,8 +532,12 @@ export default function MnemosynePanel({ state }: Props) {
                       "reinforces": "#10b981", "extends": "#3b82f6",
                       "example-of": "#06b6d4", "depends-on": "#f59e0b",
                       "contradicts": "#ef4444", "supersede": "#a855f7",
+                      "same_as": "#06b6d4", "inherits": "#8b5cf6",
+                      "shortcut_for": "#f59e0b", "derived_from": "#10b981",
+                      "enables": "#3b82f6", "opposes": "#ef4444",
                     };
                     const color = relColors[e.relation] ?? "#9ca3af";
+                    const isExplicit = (e as any).source === "explicit";
                     const otherTitle = e.fromTitle === selected.title ? e.toTitle : e.fromTitle;
                     return (
                       <div
@@ -488,8 +545,8 @@ export default function MnemosynePanel({ state }: Props) {
                         style={{
                           padding: "6px 8px",
                           borderRadius: "4px",
-                          border: `1px solid ${color}33`,
-                          backgroundColor: "#0e0e0e",
+                          border: `1px solid ${isExplicit ? color + "88" : color + "33"}`,
+                          backgroundColor: isExplicit ? "#0f0e14" : "#0e0e0e",
                           cursor: e.otherId ? "pointer" : "default",
                         }}
                         onClick={() => {
@@ -502,6 +559,9 @@ export default function MnemosynePanel({ state }: Props) {
                           <span style={{ fontSize: "10px", color, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
                             {e.relation.replace(/_/g, " ")}
                           </span>
+                          {isExplicit ? (
+                            <span style={{ fontSize: "9px", color: "#6b7280", background: "#1a1a2e", padding: "1px 4px", borderRadius: "3px" }}>explicit</span>
+                          ) : null}
                           {otherTitle ? (
                             <span style={{ fontSize: "11px", color: "#d1d5db", flex: 1, wordBreak: "break-word" }}>
                               → {otherTitle}

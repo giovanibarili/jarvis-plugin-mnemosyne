@@ -14,7 +14,7 @@ interface Props {
   onDelete?: (id: string) => void;
 }
 
-const CATEGORY_COLOR: Record<Category, string> = {
+const CATEGORY_COLOR: Record<string, string> = {
   "code-pattern": "#3b82f6",
   preference: "#8b5cf6",
   "architecture-decision": "#10b981",
@@ -22,9 +22,13 @@ const CATEGORY_COLOR: Record<Category, string> = {
   glossary: "#6366f1",
   "anti-pattern": "#ef4444",
   workflow: "#ec4899",
+  // Hermes v2 cognitive categories
+  "reasoning-pattern": "#f59e0b",
+  "decision-heuristic": "#f97316",
+  "value-priority": "#a855f7",
 };
 
-const CATEGORY_LABEL: Record<Category, string> = {
+const CATEGORY_LABEL: Record<string, string> = {
   "code-pattern": "code",
   preference: "pref",
   "architecture-decision": "decision",
@@ -32,6 +36,10 @@ const CATEGORY_LABEL: Record<Category, string> = {
   glossary: "term",
   "anti-pattern": "anti",
   workflow: "wf",
+  // Hermes v2 cognitive categories
+  "reasoning-pattern": "r-pat",
+  "decision-heuristic": "d-heu",
+  "value-priority": "v-pri",
 };
 
 function formatRelative(ts: number): string {
@@ -69,10 +77,14 @@ export default function MemoryCard({ memory, selected, onSelect, onPin, onDelete
     >
       <div style={styles.headerRow}>
         <span
-          style={{ ...styles.categoryChip, backgroundColor: CATEGORY_COLOR[memory.category] }}
+          style={{ ...styles.categoryChip, backgroundColor: CATEGORY_COLOR[memory.category] ?? "#6b7280" }}
         >
-          {CATEGORY_LABEL[memory.category]}
+          {CATEGORY_LABEL[memory.category] ?? memory.category.slice(0, 5)}
         </span>
+        {/* Hermes v2: domain pill */}
+        {(memory as any).domain ? (
+          <span style={styles.domainChip}>⬡ {(memory as any).domain}</span>
+        ) : null}
         <span style={styles.title}>{memory.title}</span>
         <div style={styles.headerRight}>
           {conflict ? (
@@ -175,6 +187,17 @@ const styles: Record<string, any> = {
     textTransform: "uppercase",
     letterSpacing: "0.04em",
     flexShrink: 0,
+  },
+  // Hermes v2: domain pill
+  domainChip: {
+    padding: "1px 6px",
+    borderRadius: "10px",
+    fontSize: "9px",
+    color: "#a855f7",
+    border: "1px solid #3b1d5a",
+    backgroundColor: "#1a0d2e",
+    flexShrink: 0,
+    letterSpacing: "0.02em",
   },
   title: {
     fontWeight: 600,

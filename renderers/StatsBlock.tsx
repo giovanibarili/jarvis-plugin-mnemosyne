@@ -237,9 +237,16 @@ export default function StatsBlock({ runtime, collapsed, onToggle }: Props) {
             {categories.length === 0 ? (
               <div style={s.empty}>no triage data yet</div>
             ) : (
-              categories.map(([cat, n]) => (
-                <BucketRow key={cat} label={cat} value={n} max={maxCat} color="#3b82f6" />
-              ))
+              categories.map(([cat, n]) => {
+                // Hermes v2: cognitive categories get distinct colors
+                const cogColors: Record<string, string> = {
+                  "reasoning-pattern": "#f59e0b",
+                  "decision-heuristic": "#f97316",
+                  "value-priority": "#a855f7",
+                };
+                const barColor = cogColors[cat] ?? "#3b82f6";
+                return <BucketRow key={cat} label={cat} value={n} max={maxCat} color={barColor} />;
+              })
             )}
             <div style={s.footer}>
               <span style={s.footerHint}>
