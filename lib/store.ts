@@ -79,6 +79,9 @@ export class MnemosyneStore {
           created_at: memory.created_at,
           visibility: memory.visibility,
           source_session: memory.source_session,
+          // Hermes-first: domain/entity filterable in vector search.
+          domain: memory.domain ?? "",
+          entity: memory.entity ?? "",
         },
       });
     } catch (e) {

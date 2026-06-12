@@ -27,11 +27,6 @@ import { ConsolidatorPiece } from "./consolidator.js";
 import { PanelPiece } from "./panel.js";
 import { RelatePiece } from "./relate.js";
 import { BackgroundReviewPiece } from "./background-review.js";
-import { EncoderV12, type EncodedMemory } from "../lib/v12/encoder-v12.js";
-import { CategoryCatalog } from "../lib/v12/category-catalog.js";
-import { PendingCategoriesStore } from "../lib/v12/pending-categories-store.js";
-import { RelateJudge } from "../lib/v12/relate-judge.js";
-import { v4 as uuidv4 } from "uuid";
 import type { Memory } from "../lib/types.js";
 import {
   buildMemorySearchTool,
@@ -62,9 +57,14 @@ import {
 } from "../lib/tools/admin-tools.js";
 import { buildMnemosyneStatusTool } from "../lib/tools/status-tool.js";
 import { buildMemoryFetchTool } from "../lib/tools/memory-fetch.js";
-import { buildMnemosyneTriageTool } from "../lib/tools/triage-tool.js";
 import { buildMemoryRelateTool } from "../lib/tools/memory-relate-tool.js";
 import { buildSessionAttentionTool } from "../lib/tools/session-attention-tool.js";
+import { DomainCatalog, EntityCatalog } from "../lib/catalogs.js";
+import {
+  buildNewDomainTool,
+  buildNewEntityTool,
+  buildNewMemoryTool,
+} from "../lib/tools/memory-primitives.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
 
 // ESM equivalent of __dirname
@@ -282,20 +282,29 @@ ${block}
   // Reads enabled/cadence from plugin config (ctx.config.background_review).
   // Gated on bootstrap so it only starts after the store is ready.
   const brConfig = (ctx.config as any)?.background_review ?? {};
+  const bgReviewRef: { current?: BackgroundReviewPiece } = {};
   const backgroundReview = gatedPiece(
     "mnemosyne-background-review",
     "Mnemosyne Background Review",
     bootstrap,
-    (b) => new BackgroundReviewPiece(
-      b.store,
-      { bus: ctx.bus, sessionManager: ctx.sessionManager },
-      {
-        enabled: brConfig.enabled ?? false,
-        reviewEveryNTurns: brConfig.reviewEveryNTurns ?? 5,
-        idleTriggerMinutes: brConfig.idleTriggerMinutes ?? 5,
-        timeoutSeconds: brConfig.timeoutSeconds ?? 60,
-      }
-    )
+    (b) => {
+      const br = new BackgroundReviewPiece(
+        b.store,
+        { bus: ctx.bus, sessionManager: ctx.sessionManager },
+        {
+          enabled: brConfig.enabled ?? false,
+          reviewEveryNTurns: brConfig.reviewEveryNTurns ?? 5,
+          idleTriggerMinutes: brConfig.idleTriggerMinutes ?? 5,
+          timeoutSeconds: brConfig.timeoutSeconds ?? 60,
+        }
+      );
+      bgReviewRef.current = br;
+      // Wire to panel for stats after bootstrap
+      bootstrap.then((b) => {
+        b.panel.setStatsSources(b.encoder, b.retriever, b.consolidator, br);
+      }).catch(() => {});
+      return br;
+    }
   );
 
   return [
@@ -448,12 +457,19 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // ReplayEngine constructed for Task 13 tools to consume
   const replayEngine = new ReplayEngine({ logger });
 
-  // 7. Construct pieces — v12 pipeline is the only path
-  // EncoderPiece is constructed with a placeholder hook; wireV12Pipeline
-  // replaces it with the real EncoderV12 + RelatePiece after building them.
+  // 7. Construct pieces — Hermes-first model.
+  //
+  // The EncoderPiece is kept ALIVE only as a structural placeholder (so the
+  // Bootstrap interface and HUD stats don't break), but eager extraction is
+  // DISABLED: the observer's turn callback is a no-op. All memory writes now
+  // flow through the new_memory tool (hermes-reviewer → new_memory → store.write).
+  // The TRIPLET (EncoderV12/triage/classify/enrich) is no longer wired.
   const encoder = new EncoderPiece(store, logger, { encoder: null as any });
   const observer = new ObserverPiece(
-    (turn) => encoder.enqueue(turn),
+    // Hermes-first: eager auto-enqueue removed. Observer still maintains the
+    // prior-turns ring buffer (used by BackgroundReview context), but never
+    // feeds the encoder.
+    (_turn) => {},
     config.encoder.context_window_size ?? 10
   );
   const retriever = new RetrieverPiece(store, reranker, {
@@ -487,13 +503,22 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   const panel = new PanelPiece(store, neo4j, logger);
   // Late binding: the panel needs encoder + retriever for live stats. Both
   // were created above in this same bootstrap function; safe to wire now.
-  panel.setStatsSources(encoder, retriever);
+  panel.setStatsSources(encoder, retriever, consolidator);
 
-  // 7b. Wire the pipeline (always — no feature flag)
-  // relatePieceRef is passed to registerTools so memory_promote can trigger
-  // relate after promotion. wireV12Pipeline populates relatePieceRef.current.
+  // 7b. Hermes-first taxonomy catalogs.
+  //
+  // The TRIPLET pipeline (wireV12Pipeline) is RETIRED. Memory extraction is now
+  // fully LLM-orchestrated via the new_domain/new_entity/new_memory primitives.
+  // relatePieceRef stays defined (memory_promote still wants it) but is left
+  // empty — promotion-time relate is no longer auto-fired.
   const relatePieceRef: { current?: RelatePiece } = {};
-  await wireV12Pipeline({ encoder, store, chroma, neo4j, llm, logger, config, relatePieceRef });
+
+  const domainsDir = `${DATA_DIR}/domains`;
+  const entitiesDir = `${DATA_DIR}/entities`;
+  const domainCatalog = new DomainCatalog(domainsDir);
+  const entityCatalog = new EntityCatalog(entitiesDir);
+  await domainCatalog.load();
+  await entityCatalog.load();
 
   // 8. Cron registration (D12: 3am daily consolidation)
   registerCron(ctx, config.consolidator.cron);
@@ -514,6 +539,8 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     relatePieceRef,
     { graphDegraded },
     retriever,  // T-11: passed so memory_reinforce can reset amnesia counter
+    domainCatalog,
+    entityCatalog,
   );
 
   // 10. HTTP routes used by the HUD renderer (MemoryCard / MnemosynePanel).
@@ -1124,6 +1151,8 @@ function registerTools(
   relatePieceRef?: { current?: import("./relate.js").RelatePiece },
   state: { graphDegraded: boolean } = { graphDegraded: false },
   retriever?: RetrieverPiece,
+  domainCatalog?: DomainCatalog,
+  entityCatalog?: EntityCatalog,
 ): void {
   const reg = ctx.capabilityRegistry;
 
@@ -1160,7 +1189,21 @@ function registerTools(
   reg.register(buildMnemosyneStatusTool(store, _neo4jState));
   reg.register(buildMnemosyneConsolidateTool(consolidator));
   reg.register(buildMnemosyneStatsTool(store));
-  reg.register(buildMnemosyneTriageTool(encoder));
+
+  // Hermes-first atomic primitives — replace mnemosyne_triage.
+  // new_domain / new_entity register taxonomy; new_memory writes directly to
+  // the store with STRICT domain/entity validation. The graph surface is only
+  // passed when the graph is healthy (inline relations need Neo4j).
+  if (domainCatalog && entityCatalog) {
+    reg.register(buildNewDomainTool(domainCatalog));
+    reg.register(buildNewEntityTool(domainCatalog, entityCatalog));
+    reg.register(buildNewMemoryTool(
+      store,
+      domainCatalog,
+      entityCatalog,
+      state.graphDegraded ? undefined : neo4j,
+    ));
+  }
 
   // Feedback tools — explicit tool-based replacement for fragile text signals.
   // These replace [mnemo:used:ID] and [mnemo:update:ID:...] inline text signals.
@@ -1214,185 +1257,3 @@ function registerTools(
   }
 }
 
-/* ---------------------------------------------------------------- v1.2 wiring */
-
-interface V12WireOpts {
-  encoder: EncoderPiece;
-  store: MnemosyneStore;
-  chroma: ChromaAdapter;
-  neo4j: Neo4jAdapter;
-  llm: LLMClient;
-  logger: Logger;
-  config: any;
-  relatePieceRef?: { current?: RelatePiece };
-}
-
-/**
- * Builds the v1.2 TRIPLET pipeline and wires it into the existing
- * EncoderPiece. Side-effects only; no return value. Called from
- * bootstrapAsync when `pipeline.v12_enabled === true`.
- *
- * Wiring:
- *   - CategoryCatalog          ← seed prompts + dynamic categories dir
- *   - PendingCategoriesStore   ← persists between-turn proposals
- *   - EncoderV12               ← orchestrates triage/classify/gate/intra-turn
- *   - EncoderV12 sink          ← maps EncodedMemory → Memory and calls
- *                                MnemosyneStore.write (atomic md+chroma+neo4j)
- *   - RelatePiece              ← cross-store judge step (chroma top-k → neo4j edge)
- *   - encoder.setV12Hook       ← swaps EncoderPiece's processing path
- */
-async function wireV12Pipeline(opts: V12WireOpts): Promise<void> {
-  const { encoder, store, chroma, neo4j, llm, logger, config, relatePieceRef } = opts;
-
-  // Resolve filesystem paths. Defaults mirror config.default.json but allow
-  // override via config + tilde-expansion. We expand ~/  only — anything more
-  // exotic is the operator's problem.
-  const expand = (p: string): string =>
-    p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
-
-  const categoriesDir = expand(
-    config?.categories_v12?.categories_dir ?? `${DATA_DIR}/categories/`
-  );
-  const pendingPath = expand(
-    config?.categories_v12?.pending_path ?? `${DATA_DIR}/pending-categories.json`
-  );
-  const promptsDir = join(__dirname, "../prompts");
-
-  // Ensure the categories dir exists before CategoryCatalog scans it —
-  // CategoryCatalog.load() will fail loud if the dir is missing entirely.
-  await fs.mkdir(categoriesDir, { recursive: true });
-
-  const catalog = new CategoryCatalog(promptsDir, categoriesDir);
-  await catalog.load();
-  const pending = new PendingCategoriesStore(pendingPath);
-  await pending.load();
-
-  // Sink: maps EncoderV12's EncodedMemory shape onto the canonical Memory
-  // shape and routes through MnemosyneStore for the atomic 3-layer write.
-  // We preserve the v12-assigned id so the cross-store relate step (which
-  // runs immediately after) can refer to the same memory.
-  const sink = {
-    async write(m: EncodedMemory): Promise<{ id: string }> {
-      const memory: Memory = {
-        id: m.id || uuidv4(),
-        category: m.category,
-        title: m.title,
-        content: m.content,
-        tags: m.tags ?? [],
-        project: null,
-        confidence: m.confidence,
-        reinforcements: 0,
-        visibility: "open",
-        pinned: false,
-        created_at: Date.parse(m.created_at) || Date.now(),
-        last_accessed: Date.now(),
-        source_session: m.session_id,
-        promoted_at: null,
-        evidence: m.evidence,
-        origin_source:
-          m.origin_source === "tool" || m.origin_source === "assistant"
-            ? m.origin_source
-            : "user",
-      };
-      await store.write(memory);
-      return { id: memory.id };
-    },
-  };
-
-  const encoderV12 = new EncoderV12({
-    llm,
-    catalog,
-    pending,
-    sink,
-    promptPaths: {
-      triage: join(promptsDir, "triage-v12.md"),
-      classify: join(promptsDir, "classify-v12.md"),
-      relate: join(promptsDir, "relate-judge-v12.md"),
-    },
-    classifyCfg: {
-      model: config?.classify_v12?.model ?? "haiku",
-      maxCandidates: config?.classify_v12?.max_candidates_per_turn ?? 5,
-    },
-    gateCfg: {
-      minConfidence: config?.categories_v12?.new_category_min_confidence ?? 0.7,
-      windowDays: config?.categories_v12?.new_category_recurrence_window_days ?? 7,
-      minOccurrences:
-        config?.categories_v12?.new_category_recurrence_min_occurrences ?? 2,
-    },
-    intraTurnCfg: {
-      maxPairs: config?.relate_v12?.intra_turn_max_pairs ?? 3,
-    },
-    model: config?.triage_v12?.model ?? "haiku",
-    logger,
-    enrichCfg: {
-      enabled: config?.enrich_v12?.enabled ?? true,
-      model: config?.enrich_v12?.model ?? "haiku",
-    },
-  });
-
-  // RelatePiece — optional. Only wired when relate_v12.enabled !== false to
-  // give operators an escape hatch (e.g. disable cross-store edges while
-  // tuning the judge prompt).
-  let relatePiece: RelatePiece | undefined;
-  if (config?.relate_v12?.enabled !== false) {
-    const judge = new RelateJudge(
-      llm,
-      join(promptsDir, "relate-judge-v12.md"),
-      config?.relate_v12?.model ?? "haiku"
-    );
-
-    relatePiece = new RelatePiece({
-      judge,
-      // Chroma adapter exposes per-layer query; v12 cares about the "short"
-      // layer (newly-written memories live there until consolidation
-      // promotes them). We map QueryHit → RelatePayload+id.
-      chromaQuery: async (m, topK, _threshold) => {
-        // Query both layers — memories may live in "short" (new) or "long"
-        // (promoted). Dedup by id, keeping the first occurrence.
-        const [shortHits, longHits] = await Promise.all([
-          chroma.query("short", m.content, topK),
-          chroma.query("long", m.content, topK),
-        ]);
-        const seen = new Set<string>();
-        const allHits = [...shortHits, ...longHits].filter((h) => {
-          if (seen.has(h.id)) return false;
-          seen.add(h.id);
-          return true;
-        }).slice(0, topK);
-        return allHits.map((h) => ({
-          id: h.id,
-          title: (h.metadata?.title as string) ?? "",
-          content: h.content,
-          evidence: (h.metadata?.evidence as string) ?? "",
-          origin: (h.metadata?.origin_source as string) ?? "assistant",
-          createdAt:
-            typeof h.metadata?.created_at === "number"
-              ? new Date(h.metadata.created_at as number).toISOString()
-              : ((h.metadata?.created_at as string) ?? new Date().toISOString()),
-          category: (h.metadata?.category as string) ?? "preference",
-        }));
-      },
-      neo4jWriteEdge: async (edge) => {
-        await neo4j.createRelatesToEdge(
-          edge.from,
-          edge.to,
-          edge.relation,
-          edge.confidence,
-          edge.reason,
-          (edge as any).evidence,
-        );
-      },
-      cfg: {
-        topK: config?.relate_v12?.top_k ?? 10,
-        similarityThreshold: config?.relate_v12?.similarity_threshold ?? 0.72,
-        judgeCap: config?.relate_v12?.judge_cap_per_memory ?? 5,
-        minEdgeConfidence: config?.relate_v12?.min_edge_confidence ?? 0.75,
-      },
-    });
-  }
-
-  encoder.setV12Hook({ encoder: encoderV12, relatePiece });
-  if (relatePieceRef && relatePiece) {
-    relatePieceRef.current = relatePiece;
-  }
-}

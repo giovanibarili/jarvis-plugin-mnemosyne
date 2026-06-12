@@ -49,6 +49,9 @@ export class MarkdownStore {
       origin_source: memory.origin_source ?? null,
       origin_tool: memory.origin_tool ?? null,
       origin_ref: memory.origin_ref ?? null,
+      // Hermes-first: domain/entity are first-class structured fields.
+      domain: memory.domain ?? null,
+      entity: memory.entity ?? null,
     };
 
     const fileContent = `---\n${yamlStringify(frontmatter)}---\n\n${memory.content}\n`;
@@ -99,6 +102,8 @@ export class MarkdownStore {
             origin_source: data.origin_source ?? undefined,
             origin_tool: data.origin_tool ?? undefined,
             origin_ref: data.origin_ref ?? undefined,
+            domain: data.domain ?? undefined,
+            entity: data.entity ?? null,
           };
           if (filter.visibility && mem.visibility !== filter.visibility) continue;
           if (filter.pinned !== undefined && mem.pinned !== filter.pinned) continue;

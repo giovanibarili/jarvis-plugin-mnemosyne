@@ -125,6 +125,10 @@ export class Neo4jAdapter {
             promoted_at: memory.promoted_at,
             source_session: memory.source_session,
             chroma_id: memory.id,
+            // Hermes-first: domain/entity as graph node props (null-safe — Neo4j
+            // rejects null in SET +=, so coerce to empty string).
+            domain: memory.domain ?? "",
+            entity: memory.entity ?? "",
           },
         }
       );
