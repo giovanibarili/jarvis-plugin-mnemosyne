@@ -15,3 +15,9 @@ CREATE INDEX memory_visibility IF NOT EXISTS FOR (m:Memory) ON (m.visibility);
 CREATE INDEX memory_pinned IF NOT EXISTS FOR (m:Memory) ON (m.pinned);
 CREATE INDEX memory_session IF NOT EXISTS FOR (m:Memory) ON (m.source_session);
 CREATE INDEX workflow_name IF NOT EXISTS FOR (w:Workflow) ON (w.name);
+
+// Hermes-first taxonomy nodes
+CREATE CONSTRAINT domain_slug IF NOT EXISTS FOR (d:Domain) REQUIRE d.slug IS UNIQUE;
+CREATE CONSTRAINT entity_slug IF NOT EXISTS FOR (e:Entity) REQUIRE (e.slug, e.domain) IS UNIQUE;
+CREATE INDEX domain_description IF NOT EXISTS FOR (d:Domain) ON (d.description);
+CREATE INDEX entity_domain IF NOT EXISTS FOR (e:Entity) ON (e.domain);

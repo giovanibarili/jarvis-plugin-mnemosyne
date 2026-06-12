@@ -742,4 +742,74 @@ export class Neo4jAdapter {
       await s.close();
     }
   }
+
+  // ── Hermes-first taxonomy nodes ──────────────────────────────────────────
+  //
+  // WHY first-class nodes instead of just props on Memory:
+  //   With only props (m.domain = "mnemosyne"), the graph has no way to
+  //   navigate FROM a domain TO its memories — you'd need a full scan.
+  //   As (:Domain)-[:HAS_ENTITY]->(:Entity) and
+  //      (:Memory)-[:BELONGS_TO]->(:Domain) / [:ABOUT]->(:Entity),
+  //   the graph tab can render the full taxonomy hierarchy and let the user
+  //   click a Domain node to see all its memories.
+  //
+  // All ops are MERGE — fully idempotent. Calling with the same slug twice
+  // only updates description/updated_at, never creates duplicates.
+
+  /** Upsert a :Domain node. Called by new_domain tool after catalog.register(). */
+  async upsertDomain(slug: string, description: string): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(
+        `MERGE (d:Domain {slug: $slug})
+         SET d.description = $description,
+             d.updated_at  = $now`,
+        { slug, description, now: Date.now() },
+      );
+    } finally {
+      await s.close();
+    }
+  }
+
+  /** Upsert a :Entity node and wire it to its :Domain. Called by new_entity tool. */
+  async upsertEntity(domain: string, slug: string, description: string): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(
+        `MERGE (d:Domain {slug: $domain})
+         MERGE (e:Entity {slug: $slug, domain: $domain})
+         SET e.description = $description,
+             e.updated_at  = $now
+         MERGE (d)-[:HAS_ENTITY]->(e)`,
+        { domain, slug, description, now: Date.now() },
+      );
+    } finally {
+      await s.close();
+    }
+  }
+
+  /** Wire a :Memory node to its :Domain and optionally :Entity. Called by new_memory tool. */
+  async linkMemoryToTaxonomy(memoryId: string, domain: string, entity: string | null): Promise<void> {
+    const s = this.session();
+    try {
+      // Always link to domain
+      await s.run(
+        `MATCH (m:Memory {id: $memoryId})
+         MERGE (d:Domain {slug: $domain})
+         MERGE (m)-[:BELONGS_TO]->(d)`,
+        { memoryId, domain },
+      );
+      // Link to entity if provided
+      if (entity) {
+        await s.run(
+          `MATCH (m:Memory {id: $memoryId})
+           MERGE (e:Entity {slug: $entity, domain: $domain})
+           MERGE (m)-[:ABOUT]->(e)`,
+          { memoryId, entity, domain },
+        );
+      }
+    } finally {
+      await s.close();
+    }
+  }
 }

@@ -31,9 +31,12 @@ export interface PrimitiveStore {
   write(memory: Memory): Promise<void>;
 }
 
-/** Minimal graph surface for inline relations. */
+/** Minimal graph surface for inline relations + taxonomy wiring. */
 export interface PrimitiveGraph {
   createExplicitEdge(fromId: string, toId: string, relation: string, reason: string): Promise<void>;
+  upsertDomain(slug: string, description: string): Promise<void>;
+  upsertEntity(domain: string, slug: string, description: string): Promise<void>;
+  linkMemoryToTaxonomy(memoryId: string, domain: string, entity: string | null): Promise<void>;
 }
 
 /** Mnemosyne id format — mirror EncoderV12: <session>-<ts>-<rand6>. */
@@ -75,7 +78,7 @@ export function makeWriterStats(): WriterStats {
 
 // ── new_domain ───────────────────────────────────────────────────────────────
 
-export function buildNewDomainTool(catalog: DomainCatalog, stats?: WriterStats): CapabilityDefinition {
+export function buildNewDomainTool(catalog: DomainCatalog, stats?: WriterStats, graph?: PrimitiveGraph): CapabilityDefinition {
   return {
     name: "new_domain",
     description:
@@ -100,6 +103,8 @@ export function buildNewDomainTool(catalog: DomainCatalog, stats?: WriterStats):
       if (!description) return { ok: false, error: "description is required" };
       const { created } = await catalog.register(slug, description);
       if (stats) { stats.domainCalls++; if (created) stats.domainsCreated++; }
+      // Mirror to Neo4j — idempotent MERGE, best-effort (graph may be degraded)
+      if (graph) await graph.upsertDomain(slug, description).catch(() => {});
       return { ok: true, slug, created, existed: !created };
     },
   };
@@ -111,6 +116,7 @@ export function buildNewEntityTool(
   domains: DomainCatalog,
   entities: EntityCatalog,
   stats?: WriterStats,
+  graph?: PrimitiveGraph,
 ): CapabilityDefinition {
   return {
     name: "new_entity",
@@ -139,6 +145,8 @@ export function buildNewEntityTool(
       }
       const { created } = await entities.register(domain, slug, description);
       if (stats) { stats.entityCalls++; if (created) stats.entitiesCreated++; }
+      // Mirror to Neo4j — idempotent MERGE under its domain node, best-effort
+      if (graph) await graph.upsertEntity(domain, slug, description).catch(() => {});
       return { ok: true, domain, slug, created, existed: !created };
     },
   };
@@ -243,6 +251,8 @@ export function buildNewMemoryTool(
 
       await store.write(memory);
       if (stats) { stats.memoryWrites++; stats.lastWriteAt = now; }
+      // Wire Memory → Domain (and → Entity) in the graph, best-effort
+      if (graph) await graph.linkMemoryToTaxonomy(memory.id, domain, entity).catch(() => {});
 
       // Inline relations — best-effort; a failed edge does not undo the write.
       const relations = Array.isArray(args.relations) ? (args.relations as RelationInput[]) : [];

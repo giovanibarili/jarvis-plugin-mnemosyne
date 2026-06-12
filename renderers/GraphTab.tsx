@@ -289,6 +289,16 @@ function buildCypher(filters: Filters): string {
     MATCH (n:Memory)
     ${whereClause}
     OPTIONAL MATCH (n)-[r]-(m)
+    WHERE m IS NULL OR m:Memory OR m:Workflow OR m:Step OR m:Domain OR m:Entity
+    WITH collect(n) + collect(m) AS nodes, collect(r) AS rels
+    UNWIND nodes AS node
+    OPTIONAL MATCH (node)-[r2:HAS_ENTITY|BELONGS_TO|ABOUT]-(tax)
+    WHERE tax:Domain OR tax:Entity
+    RETURN node AS n, r2 AS r, tax AS m
+    UNION
+    MATCH (n:Memory)
+    ${whereClause}
+    OPTIONAL MATCH (n)-[r]-(m)
     WHERE m IS NULL OR m:Memory OR m:Workflow OR m:Step
     RETURN n, r, m
   `.trim();
@@ -490,6 +500,29 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
           },
           Workflow: { label: "name" },
           Step: { label: "action" },
+          // Hermes-first taxonomy nodes
+          Domain: {
+            label: "slug",
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                shape: "hexagon",
+                size: 28,
+                color: { background: "#2d1457", border: "#a855f7", highlight: { background: "#3d1a6e", border: "#c084fc" } },
+                font: { color: "#e9d5ff", size: 13, strokeWidth: 2, strokeColor: "#000", bold: true },
+              },
+            },
+          },
+          Entity: {
+            label: "slug",
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                shape: "diamond",
+                size: 18,
+                color: { background: "#1e1157", border: "#8b5cf6", highlight: { background: "#2d1a6e", border: "#a78bfa" } },
+                font: { color: "#ddd6fe", size: 11, strokeWidth: 2, strokeColor: "#000" },
+              },
+            },
+          },
         },
         relationships: {
           MENTIONS: {
@@ -520,6 +553,39 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
                 color: { color: "#ef4444" },
                 dashes: true,
                 font: { size: 9, color: "#ef4444", strokeWidth: 0, align: "middle" },
+              },
+            },
+          },
+          // Hermes-first taxonomy edges
+          BELONGS_TO: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                label: "domain",
+                arrows: { to: { enabled: true } },
+                color: { color: "#a855f7", opacity: 0.5 },
+                dashes: [4, 4],
+                font: { size: 8, color: "#a855f7", strokeWidth: 0, align: "middle" },
+              },
+            },
+          },
+          ABOUT: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                label: "entity",
+                arrows: { to: { enabled: true } },
+                color: { color: "#8b5cf6", opacity: 0.5 },
+                dashes: [2, 4],
+                font: { size: 8, color: "#8b5cf6", strokeWidth: 0, align: "middle" },
+              },
+            },
+          },
+          HAS_ENTITY: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                label: "entity",
+                arrows: { to: { enabled: true } },
+                color: { color: "#6d28d9", opacity: 0.6 },
+                font: { size: 8, color: "#6d28d9", strokeWidth: 0, align: "middle" },
               },
             },
           },

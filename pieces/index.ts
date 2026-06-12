@@ -1205,15 +1205,12 @@ function registerTools(
   // the store with STRICT domain/entity validation. The graph surface is only
   // passed when the graph is healthy (inline relations need Neo4j).
   if (domainCatalog && entityCatalog) {
-    reg.register(buildNewDomainTool(domainCatalog, writerStats));
-    reg.register(buildNewEntityTool(domainCatalog, entityCatalog, writerStats));
-    reg.register(buildNewMemoryTool(
-      store,
-      domainCatalog,
-      entityCatalog,
-      state.graphDegraded ? undefined : neo4j,
-      writerStats,
-    ));
+    // Pass neo4j as PrimitiveGraph so new_domain/new_entity/new_memory mirror
+    // taxonomy into the graph (Domain/Entity nodes + BELONGS_TO/ABOUT edges).
+    const graph = state.graphDegraded ? undefined : neo4j;
+    reg.register(buildNewDomainTool(domainCatalog, writerStats, graph));
+    reg.register(buildNewEntityTool(domainCatalog, entityCatalog, writerStats, graph));
+    reg.register(buildNewMemoryTool(store, domainCatalog, entityCatalog, graph, writerStats));
   }
 
   // Feedback tools — explicit tool-based replacement for fragile text signals.
