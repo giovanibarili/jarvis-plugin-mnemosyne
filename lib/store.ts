@@ -1,4 +1,4 @@
-import type { Memory } from "./types";
+import type { Memory, AttentionState } from "./types";
 import { MarkdownStore } from "./markdown-store";
 import { ChromaAdapter } from "./chroma-adapter";
 import { Neo4jAdapter } from "./neo4j-adapter";
@@ -24,12 +24,31 @@ export class MnemosyneStore {
    */
   private graphDegraded = false;
 
+  /**
+   * Per-session attention state declared by the reviewer via session_attention_update.
+   * Used as Tier 1 filter by the retriever on the next turn: memories matching
+   * active_domains / active_entities / active_categories get a score boost.
+   * In-memory only — intentionally not persisted (resets on restart; the reviewer
+   * re-declares context at the start of each session via review pass).
+   */
+  private attentionState: Map<string, AttentionState> = new Map();
+
   constructor(
     public markdownStore: MarkdownStore,
     public chroma: ChromaAdapter,
     public neo4j: Neo4jAdapter,
     public logger: Logger
   ) {}
+
+  /** Returns the current attention state for a session, or undefined if not yet declared. */
+  getAttentionState(sessionId: string): AttentionState | undefined {
+    return this.attentionState.get(sessionId);
+  }
+
+  /** Persists the attention state for a session. Overwrites any previous state. */
+  setAttentionState(sessionId: string, state: AttentionState): void {
+    this.attentionState.set(sessionId, state);
+  }
 
   /** Toggle runtime graph degradation. Idempotent. */
   setGraphDegraded(value: boolean): void {
