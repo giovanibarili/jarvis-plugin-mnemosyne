@@ -314,6 +314,36 @@ export class Neo4jAdapter {
   }
 
   /**
+   * Create an explicit semantic edge from fromId to toId.
+   * Called by the memory_relate tool when the reviewer identifies a meaningful
+   * connection directly. relation is a free string (suggestions: merge, supersede,
+   * same_as, inherits, relates_to, etc). source is set to 'explicit' to
+   * distinguish from automatic relate-judge edges (source='semantic').
+   * MERGE on (fromId, toId, relation) — idempotent: calling with the same
+   * args only updates reason/created_at, never duplicates the edge.
+   */
+  async createExplicitEdge(
+    fromId: string,
+    toId: string,
+    relation: string,
+    reason: string,
+  ): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(
+        `MATCH (a:Memory {id: $fromId}), (b:Memory {id: $toId})
+         MERGE (a)-[r:RELATES_TO {relation: $relation}]->(b)
+         SET r.source     = 'explicit',
+             r.reason     = $reason,
+             r.created_at = $now`,
+        { fromId, toId, relation, reason, now: Date.now() },
+      );
+    } finally {
+      await s.close();
+    }
+  }
+
+  /**
    * Create a bidirectional CONTRADICTS edge between two memories. Used by the
    * consolidator's conflict detector — both nodes stay in the graph (D6 keep-both)
    * and the retriever surfaces the conflict at query time.

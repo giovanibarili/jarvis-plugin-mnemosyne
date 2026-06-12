@@ -62,6 +62,7 @@ import {
 import { buildMnemosyneStatusTool } from "../lib/tools/status-tool.js";
 import { buildMemoryFetchTool } from "../lib/tools/memory-fetch.js";
 import { buildMnemosyneTriageTool } from "../lib/tools/triage-tool.js";
+import { buildMemoryRelateTool } from "../lib/tools/memory-relate-tool.js";
 import { GraphNeighborhoodService } from "../lib/graph-neighborhood.js";
 
 // ESM equivalent of __dirname
@@ -1118,8 +1119,13 @@ function registerTools(
     reg.register(buildWorkflowListTool(neo4j));
     reg.register(buildWorkflowGetTool(neo4j));
     reg.register(buildWorkflowReplayTool(neo4j, replay));
+    // Explicit edge creation — lets the reviewer wire semantic connections
+    // intentionally (source='explicit') rather than relying on the opaque
+    // relate-judge (source='semantic'). Gated here so it's unavailable when
+    // graph is down and would just throw on every call.
+    reg.register(buildMemoryRelateTool(neo4j));
   } else {
-    console.warn("[mnemosyne] graph degraded — skipping workflow_* tools");
+    console.warn("[mnemosyne] graph degraded — skipping workflow_* and memory_relate tools");
   }
 
   // Admin — status tool always registered so the user can introspect.
