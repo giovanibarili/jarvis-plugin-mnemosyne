@@ -115,7 +115,16 @@ export function createPieces(ctx: PluginContext): Piece[] {
   // retriever.systemContext(sessionId) which bumps `reinforcements` for every
   // hit that lands in the block.
   if (typeof ctx.registerContextInjector === "function") {
-    const SESSION_EXCLUDE = /mnemosyne-skip/;
+    // Build SESSION_EXCLUDE from config.session_blacklist.patterns.
+    // Defaults: ["mnemosyne-skip", "^slack-connector-"] — always included.
+    // Operators can extend via config without touching code.
+    const blacklistPatterns: string[] = [
+      "mnemosyne-skip",           // ephemeral workers (always excluded)
+      ...(((ctx.config as any)?.session_blacklist?.patterns as string[]) ?? [
+        "^slack-connector-",       // high-volume, low-signal slack sessions
+      ]),
+    ];
+    const SESSION_EXCLUDE = new RegExp(blacklistPatterns.join("|"));
     // Per-session tracking:
     //   lastInjectedBlock     — full block string dedup (same block → skip)
     //   lastNotifiedBlock     — same dedup for timeline notification
@@ -277,6 +286,16 @@ ${block}
     });
   }
 
+  // Compile session blacklist once — shared by injector AND BackgroundReviewPiece.
+  // This ensures both exclusion points are always in sync.
+  const blacklistPatterns: string[] = [
+    "mnemosyne-skip",
+    ...(((ctx.config as any)?.session_blacklist?.patterns as string[]) ?? [
+      "^slack-connector-",
+    ]),
+  ];
+  const sessionBlacklist = new RegExp(blacklistPatterns.join("|"));
+
   // Each piece is wrapped in a gate that awaits bootstrap before delegating
   // to the real piece's start(). The wrapped piece exposes the same id/name
   // so the HUD and capability registry behave identically.
@@ -298,6 +317,7 @@ ${block}
           reviewEveryNTurns: brConfig.reviewEveryNTurns ?? 5,
           idleTriggerMinutes: brConfig.idleTriggerMinutes ?? 5,
           timeoutSeconds: brConfig.timeoutSeconds ?? 60,
+          sessionBlacklist,
         }
       );
       bgReviewRef.current = br;

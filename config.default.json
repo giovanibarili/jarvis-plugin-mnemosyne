@@ -100,5 +100,12 @@
     "enabled": false,
     "max_parents": 10,
     "max_children": 20
+  },
+  "session_blacklist": {
+    "_comment": "Regex patterns (tested via RegExp.test(sessionId)). Matching sessions are excluded from memory injection AND background review.",
+    "patterns": [
+      "mnemosyne-skip",
+      "^slack-connector-"
+    ]
   }
 }

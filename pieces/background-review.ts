@@ -103,6 +103,13 @@ export interface BackgroundReviewConfig {
    * next trigger can start a fresh review.
    */
   timeoutSeconds?: number;
+  /**
+   * Compiled regex tested against sessionId. Matching sessions are excluded
+   * from turn counting AND review triggering. Passed from index.ts so
+   * the injector and the reviewer share the same blacklist.
+   * Default: /mnemosyne-skip|^slack-connector-/
+   */
+  sessionBlacklist?: RegExp;
 }
 
 /**
@@ -213,6 +220,15 @@ export class BackgroundReviewPiece implements Piece {
     // D1: anti-loop guard — ignore our own reviews and internal machine turns
     if (REVIEW_SOURCES.has(source)) {
       log.debug({ id: this.id, source, sessionId }, "BackgroundReviewPiece: skipping machine-sourced turn");
+      return;
+    }
+
+    // D1b: skip blacklisted sessions — configurable via BackgroundReviewConfig.sessionBlacklist.
+    // Default covers mnemosyne-skip (ephemeral workers) and ^slack-connector- (high-volume,
+    // low-signal Slack exchanges that rarely contain long-term knowledge worth reviewing).
+    const blacklist = this.config.sessionBlacklist ?? /mnemosyne-skip|^slack-connector-/;
+    if (blacklist.test(sessionId)) {
+      log.debug({ id: this.id, sessionId }, "BackgroundReviewPiece: skipping blacklisted session");
       return;
     }
 
