@@ -3,7 +3,7 @@ import { EventBus } from "@jarvis/core";
 import { log, setPluginLogger } from "../lib/log.js";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { promises as fs } from "fs";
+import { promises as fs, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 
 import { preflight, MnemosyneBootError } from "../lib/preflight.js";
@@ -425,10 +425,16 @@ function checkSetupWarnings(config: Record<string, unknown>): SetupWarning[] {
 }
 
 /**
- * Publish setup warnings to the main session as a natural-language prompt
- * so JARVIS surfaces them interactively and asks the user to configure.
+ * Write setup warnings to ~/.jarvis/startup-prompt.txt so JarvisCore injects
+ * them into the main session on the NEXT user turn — after the session is fully
+ * ready to receive messages. This avoids the race condition where bus.publish
+ * fires before main is listening (bootstrap runs before the first user turn).
+ *
+ * The file is consumed+deleted by consumeStartupPrompt() in conversation-store.ts.
+ * Writing here is safe: if a prompt already exists (e.g. from jarvis_reset) we
+ * APPEND so neither message is lost.
  */
-function notifySetupWarnings(ctx: PluginContext, warnings: SetupWarning[]): void {
+function notifySetupWarnings(_ctx: PluginContext, warnings: SetupWarning[]): void {
   if (warnings.length === 0) return;
 
   const lines = [
@@ -441,15 +447,18 @@ function notifySetupWarnings(ctx: PluginContext, warnings: SetupWarning[]): void
     ].join("\n")),
     "",
     "Please configure Mnemosyne now so memory extraction works correctly.",
-    "Ask me to configure `background_review` and I will walk you through the options.",
+    "Ask me to enable `background_review` and I will write the config for you.",
   ];
 
-  ctx.bus.publish({
-    channel: "ai.request",
-    source: "mnemosyne-setup",
-    target: "main",
-    text: lines.join("\n"),
-  } as any);
+  const promptPath = join(process.env.HOME ?? "~", ".jarvis", "startup-prompt.txt");
+  try {
+    const text = lines.join("\n") + "\n";
+    // Append if file already exists (e.g. jarvis_reset wrote something first)
+    const existing = (() => { try { return readFileSync(promptPath, "utf-8"); } catch { return ""; } })();
+    writeFileSync(promptPath, existing ? existing + "\n---\n" + text : text, "utf-8");
+  } catch (e) {
+    console.error("[mnemosyne] notifySetupWarnings: failed to write startup-prompt.txt:", e);
+  }
 }
 
 async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
