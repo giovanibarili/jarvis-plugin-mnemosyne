@@ -350,6 +350,17 @@ export default function MnemosynePanel({ state }: Props) {
         )}
       </div>
 
+      {/* Setup warnings — shown until user configures the missing settings */}
+      {(data?.setupWarnings ?? []).map((w: any) => (
+        <div key={w.code} style={styles.setupWarning}>
+          <span style={styles.setupWarningIcon}>⚠</span>
+          <div style={styles.setupWarningBody}>
+            <span style={styles.setupWarningMsg}>{w.message}</span>
+            <span style={styles.setupWarningAction}>→ {w.action}</span>
+          </div>
+        </div>
+      ))}
+
       {/* Hermes v2: header pills for BG Review + Consolidator */}
       <div style={styles.hermesPills}>
         {data?.backgroundReview ? (() => {
@@ -918,5 +929,36 @@ const styles: Record<string, any> = {
     color: "#10b981",
     fontStyle: "italic",
     minHeight: "14px",
+  },
+  setupWarning: {
+    display: "flex",
+    alignItems: "flex-start",
+    gap: "10px",
+    padding: "8px 14px",
+    backgroundColor: "#1a1200",
+    borderBottom: "1px solid #7c5a00",
+    borderLeft: "3px solid #f59e0b",
+  },
+  setupWarningIcon: {
+    fontSize: "14px",
+    color: "#f59e0b",
+    flexShrink: 0,
+    marginTop: "1px",
+  },
+  setupWarningBody: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "2px",
+  },
+  setupWarningMsg: {
+    fontSize: "11px",
+    color: "#fde68a",
+    fontWeight: 600,
+    fontFamily: "monospace",
+  },
+  setupWarningAction: {
+    fontSize: "10px",
+    color: "#d97706",
+    fontFamily: "monospace",
   },
 };

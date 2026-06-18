@@ -324,6 +324,7 @@ ${block}
       // Wire to panel for stats after bootstrap
       bootstrap.then((b) => {
         b.panel.setStatsSources(b.encoder, b.retriever, b.consolidator, br);
+        b.panel.setSetupWarnings(b.setupWarnings);
       }).catch(() => {});
       return br;
     }
@@ -376,6 +377,79 @@ interface Bootstrap {
   retrieverCache: Map<string, string>;
   /** MnemosyneStore — exposed so BackgroundReviewPiece can read AttentionState (T-08). */
   store: MnemosyneStore;
+  /** Non-blocking setup warnings detected at boot — passed to panel for HUD display. */
+  setupWarnings: SetupWarning[];
+}
+
+interface SetupWarning {
+  code: string;
+  message: string;
+  action: string;
+}
+
+/**
+ * Non-blocking config checks run after bootstrap. Returns warnings that are:
+ *   1. Shown as banners in the HUD panel (yellow, dismissible)
+ *   2. Published as a prompt to the `main` session so JARVIS surfaces them
+ *      interactively and asks the user to configure the missing settings.
+ *
+ * These NEVER block boot — they surface missing config that would leave the
+ * plugin silently inert (e.g. background_review.enabled: false by default).
+ */
+function checkSetupWarnings(config: Record<string, unknown>): SetupWarning[] {
+  const warnings: SetupWarning[] = [];
+
+  const br = config.background_review as Record<string, unknown> | undefined;
+
+  if (!br) {
+    warnings.push({
+      code: "background_review_missing",
+      message: "background_review not configured — Mnemosyne will NEVER extract memories from conversations.",
+      action: "Add background_review to ~/.jarvis/mnemosyne/config.json with enabled:true and reviewEveryNTurns.",
+    });
+  } else if (br.enabled !== true) {
+    warnings.push({
+      code: "background_review_disabled",
+      message: "background_review.enabled is false — Mnemosyne is running but NOT extracting memories.",
+      action: "Set background_review.enabled = true and configure reviewEveryNTurns / idleTriggerMinutes.",
+    });
+  } else if (!br.reviewEveryNTurns && !br.idleTriggerMinutes) {
+    warnings.push({
+      code: "background_review_no_trigger",
+      message: "background_review is enabled but no trigger is configured (reviewEveryNTurns and idleTriggerMinutes are both missing).",
+      action: "Set reviewEveryNTurns (e.g. 5) or idleTriggerMinutes (e.g. 10) in background_review config.",
+    });
+  }
+
+  return warnings;
+}
+
+/**
+ * Publish setup warnings to the main session as a natural-language prompt
+ * so JARVIS surfaces them interactively and asks the user to configure.
+ */
+function notifySetupWarnings(ctx: PluginContext, warnings: SetupWarning[]): void {
+  if (warnings.length === 0) return;
+
+  const lines = [
+    "[MNEMOSYNE SETUP] The following configuration issues were detected at boot:",
+    "",
+    ...warnings.map((w, i) => [
+      `${i + 1}. **${w.code}**`,
+      `   ${w.message}`,
+      `   → ${w.action}`,
+    ].join("\n")),
+    "",
+    "Please configure Mnemosyne now so memory extraction works correctly.",
+    "Ask me to configure `background_review` and I will walk you through the options.",
+  ];
+
+  ctx.bus.publish({
+    channel: "ai.request",
+    source: "mnemosyne-setup",
+    target: "main",
+    text: lines.join("\n"),
+  } as any);
 }
 
 async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
@@ -406,6 +480,12 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // 2. Load (or seed) config
   const configPath = join(DATA_DIR, "config.json");
   const config = await loadOrCreateConfig(configPath);
+
+  // 2b. Non-blocking setup warnings — detect silently-inert config.
+  // Runs immediately after config load so warnings are ready before the
+  // panel first renders. Also notifies the main session interactively.
+  const setupWarnings = checkSetupWarnings(config as Record<string, unknown>);
+  notifySetupWarnings(ctx, setupWarnings);
 
   // 3. Start Chroma server
   const chromaServer = new ChromaServer({
@@ -586,6 +666,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     panel,
     retrieverCache: new Map(),
     store,
+    setupWarnings,
   };
 }
 

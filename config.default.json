@@ -107,5 +107,12 @@
       "mnemosyne-skip",
       "^slack-connector-"
     ]
+  },
+  "background_review": {
+    "_comment": "Hermes-first cognitive curation. Set enabled:true to activate periodic memory extraction.",
+    "enabled": false,
+    "reviewEveryNTurns": 5,
+    "idleTriggerMinutes": 10,
+    "timeoutSeconds": 90
   }
 }

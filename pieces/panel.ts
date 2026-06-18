@@ -9,6 +9,7 @@ import type { ConsolidatorPiece } from "./consolidator";
 import type { BackgroundReviewPiece } from "./background-review";
 import type { WriterStats } from "../lib/tools/memory-primitives";
 import type { DomainCatalog, EntityCatalog } from "../lib/catalogs";
+import type { SetupWarning } from "../renderers/types";
 import { buildStats } from "../lib/stats";
 
 /**
@@ -90,6 +91,12 @@ export class PanelPiece implements Piece {
     this.writerStats = stats;
     this.domainCatalog = domains;
     this.entityCatalog = entities;
+  }
+
+  /** Setup warnings detected at boot — shown as banners in HUD. */
+  private setupWarnings: SetupWarning[] = [];
+  setSetupWarnings(warnings: SetupWarning[]): void {
+    this.setupWarnings = warnings;
   }
 
   async start(bus: EventBus): Promise<void> {
@@ -279,6 +286,7 @@ export class PanelPiece implements Piece {
       backgroundReview,
       consolidatorLastRun,
       writer,
+      setupWarnings: this.setupWarnings,
     };
 
     if (action === "add") {

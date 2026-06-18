@@ -173,6 +173,13 @@ export interface RetrieverTierStats {
   }>;
 }
 
+/** Non-blocking setup warning — shown as banner in HUD, prompts config action. */
+export interface SetupWarning {
+  code: string;
+  message: string;
+  action: string;
+}
+
 /** Hermes-first WRITER stats — live (session) + historical (disk). */
 export interface WriterBlock {
   session: {
@@ -214,6 +221,8 @@ export interface PanelData {
   retrieverTiers?: RetrieverTierStats | null;
   /** Hermes v2: Consolidator last run. */
   consolidatorLastRun?: ConsolidatorLastRun | null;
+  /** Non-blocking setup warnings — missing/incomplete config detected at boot. */
+  setupWarnings?: SetupWarning[];
   /** Hermes-first: WRITER stats (replaces encoder pipeline). */
   writer?: WriterBlock | null;
   /** Set when the bootstrap fails or the store is unavailable. */
