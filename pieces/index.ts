@@ -300,15 +300,19 @@ ${block}
   // to the real piece's start(). The wrapped piece exposes the same id/name
   // so the HUD and capability registry behave identically.
   // T-08: BackgroundReviewPiece — periodic cognitive curation via copy-on-write fork.
-  // Reads enabled/cadence from plugin config (ctx.config.background_review).
-  // Gated on bootstrap so it only starts after the store is ready.
-  const brConfig = (ctx.config as any)?.background_review ?? {};
+  // NOTE: brConfig is read from bootstrap (loadOrCreateConfig result), NOT from
+  // ctx.config — ctx.config is the plugin manifest config loaded by PluginManager
+  // before bootstrapAsync runs and does NOT contain ~/.jarvis/mnemosyne/config.json.
+  // We create the piece with enabled:false initially and reconfigure after bootstrap.
   const bgReviewRef: { current?: BackgroundReviewPiece } = {};
   const backgroundReview = gatedPiece(
     "mnemosyne-background-review",
     "Mnemosyne Background Review",
     bootstrap,
     (b) => {
+      // Read brConfig from the bootstrap result — this is the real
+      // ~/.jarvis/mnemosyne/config.json, not ctx.config (plugin manifest).
+      const brConfig = (b.config as any)?.background_review ?? {};
       const br = new BackgroundReviewPiece(
         b.store,
         { bus: ctx.bus, sessionManager: ctx.sessionManager },
@@ -322,10 +326,8 @@ ${block}
       );
       bgReviewRef.current = br;
       // Wire to panel for stats after bootstrap
-      bootstrap.then((b) => {
-        b.panel.setStatsSources(b.encoder, b.retriever, b.consolidator, br);
-        b.panel.setSetupWarnings(b.setupWarnings);
-      }).catch(() => {});
+      b.panel.setStatsSources(b.encoder, b.retriever, b.consolidator, br);
+      b.panel.setSetupWarnings(b.setupWarnings);
       return br;
     }
   );
@@ -379,6 +381,8 @@ interface Bootstrap {
   store: MnemosyneStore;
   /** Non-blocking setup warnings detected at boot — passed to panel for HUD display. */
   setupWarnings: SetupWarning[];
+  /** The real Mnemosyne config loaded from disk — used by BackgroundReviewPiece. */
+  config: Record<string, unknown>;
 }
 
 interface SetupWarning {
@@ -676,6 +680,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     retrieverCache: new Map(),
     store,
     setupWarnings,
+    config: config as Record<string, unknown>,
   };
 }
 
