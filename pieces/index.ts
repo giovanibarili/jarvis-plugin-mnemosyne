@@ -984,10 +984,13 @@ function gatedPiece<P extends Piece>(
   pick: (b: Bootstrap) => P
 ): Piece {
   let real: P | undefined;
+  let started = false;  // guard against double-start (boot + registerDynamic)
   return {
     id,
     name,
     async start(bus) {
+      if (started) return;  // idempotent — PieceManager may call start() twice
+      started = true;
       let b: Bootstrap;
       try {
         b = await bootstrap;
