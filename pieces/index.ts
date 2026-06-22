@@ -581,13 +581,23 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // flow through the new_memory tool (hermes-reviewer → new_memory → store.write).
   // The TRIPLET (EncoderV12/triage/classify/enrich) is no longer wired.
   const encoder = new EncoderPiece(store, logger, { encoder: null as any });
+  // Compile observer session exclude — same patterns as injector + BackgroundReview.
+  // Operators extend via settings.user.json: plugins.jarvis-plugin-mnemosyne.session_blacklist.patterns
+  const observerExcludePatterns: string[] = [
+    "mnemosyne-skip",
+    ...(((ctx.config as any)?.session_blacklist?.patterns as string[]) ?? [
+      "^slack-connector-",
+    ]),
+  ];
+  const observerExclude = new RegExp(observerExcludePatterns.join("|"));
+
   const observer = new ObserverPiece(
     // Hermes-first: eager auto-enqueue removed. Observer still maintains the
     // prior-turns ring buffer (used by BackgroundReview context), but never
     // feeds the encoder.
     (_turn) => {},
     config.encoder.context_window_size ?? 10,
-    sessionBlacklist,  // skip persona/system sessions (configured via settings.user.json)
+    observerExclude,
   );
   const retriever = new RetrieverPiece(store, reranker, {
     topK: config.retriever.top_k_vector,
