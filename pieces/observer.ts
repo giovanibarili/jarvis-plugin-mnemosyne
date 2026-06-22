@@ -48,14 +48,26 @@ export class ObserverPiece implements Piece {
    */
   private history = new Map<string, Array<{ user_message: string; assistant_response: string }>>();
 
+  /**
+   * Sessions matching this regex are ignored entirely — neither observed
+   * nor fed to the encoder. Configured via settings.user.json:
+   *   plugins.jarvis-plugin-mnemosyne.session_blacklist.patterns
+   * Defaults to /^$/ (match nothing) if not provided.
+   */
+  private sessionExclude: RegExp;
+
   constructor(
     private onTurnComplete: (turn: TurnContext) => void,
-    private contextWindowSize = 14
-  ) {}
+    private contextWindowSize = 14,
+    sessionExclude?: RegExp,
+  ) {
+    this.sessionExclude = sessionExclude ?? /^$/;
+  }
 
   async start(bus: EventBus): Promise<void> {
     bus.subscribe("ai.request", (msg: BusMessage) => {
       const sid = (msg as any).sessionId ?? msg.target ?? "main";
+      if (this.sessionExclude.test(sid)) return;
       // Guard: flush any orphaned open buffer (e.g. complete event was missed).
       // Normal path: buffer is already closed by the `complete` handler below.
       const prior = this.buffers.get(sid);
@@ -73,6 +85,7 @@ export class ObserverPiece implements Piece {
 
     bus.subscribe("ai.stream", (msg: BusMessage) => {
       const sid = (msg as any).sessionId ?? msg.target ?? "main";
+      if (this.sessionExclude.test(sid)) return;
       const buf = this.buffers.get(sid);
       if (!buf?.open) return;
 

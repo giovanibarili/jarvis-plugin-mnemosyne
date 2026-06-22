@@ -59,8 +59,9 @@ import { buildMnemosyneStatusTool } from "../lib/tools/status-tool.js";
 import { buildMemoryFetchTool } from "../lib/tools/memory-fetch.js";
 import { buildMemoryRelateTool } from "../lib/tools/memory-relate-tool.js";
 import { buildSessionAttentionTool } from "../lib/tools/session-attention-tool.js";
-import { DomainCatalog, EntityCatalog } from "../lib/catalogs.js";
+import { TaxonCatalog, DomainCatalog, EntityCatalog } from "../lib/catalogs.js";
 import {
+  buildNewTaxonTool,
   buildNewDomainTool,
   buildNewEntityTool,
   buildNewMemoryTool,
@@ -585,7 +586,8 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     // prior-turns ring buffer (used by BackgroundReview context), but never
     // feeds the encoder.
     (_turn) => {},
-    config.encoder.context_window_size ?? 10
+    config.encoder.context_window_size ?? 10,
+    sessionBlacklist,  // skip persona/system sessions (configured via settings.user.json)
   );
   const retriever = new RetrieverPiece(store, reranker, {
     topK: config.retriever.top_k_vector,
@@ -628,12 +630,12 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
   // empty — promotion-time relate is no longer auto-fired.
   const relatePieceRef: { current?: RelatePiece } = {};
 
-  const domainsDir = `${DATA_DIR}/domains`;
-  const entitiesDir = `${DATA_DIR}/entities`;
-  const domainCatalog = new DomainCatalog(domainsDir);
-  const entityCatalog = new EntityCatalog(entitiesDir);
-  await domainCatalog.load();
-  await entityCatalog.load();
+  const taxonsDir = `${DATA_DIR}/taxons`;
+  const taxonCatalog = new TaxonCatalog(taxonsDir);
+  await taxonCatalog.load();
+  // Backward-compat shims — delegate to taxonCatalog
+  const domainCatalog = new DomainCatalog(taxonCatalog);
+  const entityCatalog = new EntityCatalog(taxonCatalog);
 
   // Hermes-first WRITER stats — shared in-memory counters for the HUD.
   const writerStats = makeWriterStats();
@@ -660,6 +662,7 @@ async function bootstrapAsync(ctx: PluginContext): Promise<Bootstrap> {
     relatePieceRef,
     { graphDegraded },
     retriever,  // T-11: passed so memory_reinforce can reset amnesia counter
+    taxonCatalog,
     domainCatalog,
     entityCatalog,
     writerStats,
@@ -1278,6 +1281,7 @@ function registerTools(
   relatePieceRef?: { current?: import("./relate.js").RelatePiece },
   state: { graphDegraded: boolean } = { graphDegraded: false },
   retriever?: RetrieverPiece,
+  taxonCatalog?: TaxonCatalog,
   domainCatalog?: DomainCatalog,
   entityCatalog?: EntityCatalog,
   writerStats?: WriterStats,
@@ -1322,10 +1326,11 @@ function registerTools(
   // new_domain / new_entity register taxonomy; new_memory writes directly to
   // the store with STRICT domain/entity validation. The graph surface is only
   // passed when the graph is healthy (inline relations need Neo4j).
-  if (domainCatalog && entityCatalog) {
+  if (taxonCatalog && domainCatalog && entityCatalog) {
     // Pass neo4j as PrimitiveGraph so new_domain/new_entity/new_memory mirror
     // taxonomy into the graph (Domain/Entity nodes + BELONGS_TO/ABOUT edges).
     const graph = state.graphDegraded ? undefined : neo4j;
+    reg.register(buildNewTaxonTool(taxonCatalog, writerStats, graph));
     reg.register(buildNewDomainTool(domainCatalog, writerStats, graph));
     reg.register(buildNewEntityTool(domainCatalog, entityCatalog, writerStats, graph));
     reg.register(buildNewMemoryTool(store, domainCatalog, entityCatalog, graph, writerStats));
