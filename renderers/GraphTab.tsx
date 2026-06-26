@@ -73,10 +73,14 @@ export interface SelectedEdge {
 }
 
 export interface NodeSelection {
-  /** Memory UUID of the clicked node */
+  /** Memory UUID or slug of the clicked node */
   id: string;
   /** All edges connected to this node */
   edges: SelectedEdge[];
+  /** Neo4j node labels (e.g. ["Memory"], ["Domain"], ["Entity"]) */
+  labels?: string[];
+  /** Raw Neo4j node properties */
+  properties?: Record<string, any>;
 }
 
 interface Props {
@@ -292,8 +296,8 @@ function buildCypher(filters: Filters): string {
     WHERE m IS NULL OR m:Memory OR m:Workflow OR m:Step OR m:Domain OR m:Entity
     WITH collect(n) + collect(m) AS nodes, collect(r) AS rels
     UNWIND nodes AS node
-    OPTIONAL MATCH (node)-[r2:HAS_ENTITY|BELONGS_TO|ABOUT]-(tax)
-    WHERE tax:Domain OR tax:Entity
+    OPTIONAL MATCH (node)-[r2:HAS_ENTITY|BELONGS_TO|ABOUT|TAGGED]-(tax)
+    WHERE tax:Domain OR tax:Entity OR tax:Taxon
     RETURN node AS n, r2 AS r, tax AS m
     UNION
     MATCH (n:Memory)
@@ -318,6 +322,33 @@ function summarizeFilters(filters: Filters): string {
   if (filters.onlyLongTerm) parts.push("long-term only");
   if (filters.onlyConflicts) parts.push("conflicts only");
   return parts.join(", ");
+}
+
+// ── Taxon visual palette ─────────────────────────────────────────────────────
+// Level 1 (hexagon): business-unit, domain — top of hierarchy
+// Level 2 (diamond): everything else — services, entities, models, topics, tables
+
+// Per-type color palette
+const TAXON_COLORS: Record<string, { background: string; border: string; highlight: { background: string; border: string } }> = {
+  "business-unit": { background: "#1a0a2e", border: "#c084fc", highlight: { background: "#2d1457", border: "#e879f9" } },
+  "domain":        { background: "#2d1457", border: "#a855f7", highlight: { background: "#3d1a6e", border: "#c084fc" } },
+  "service":       { background: "#1e1157", border: "#8b5cf6", highlight: { background: "#2d1a6e", border: "#a78bfa" } },
+  "entity":        { background: "#0f172a", border: "#6366f1", highlight: { background: "#1e1b4b", border: "#818cf8" } },
+  "model":         { background: "#082f49", border: "#0ea5e9", highlight: { background: "#0c4a6e", border: "#38bdf8" } },
+  "topic":         { background: "#052e16", border: "#16a34a", highlight: { background: "#14532d", border: "#4ade80" } },
+  "table":         { background: "#1c1917", border: "#78716c", highlight: { background: "#292524", border: "#a8a29e" } },
+};
+
+/** Deterministic color for unknown taxon types — based on type string hash. */
+function taxonColorByHash(type: string): { background: string; border: string; highlight: { background: string; border: string } } {
+  let h = 0;
+  for (let i = 0; i < type.length; i++) h = (Math.imul(31, h) + type.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return {
+    background: `hsl(${hue}, 60%, 12%)`,
+    border: `hsl(${hue}, 70%, 50%)`,
+    highlight: { background: `hsl(${hue}, 60%, 18%)`, border: `hsl(${hue}, 70%, 65%)` },
+  };
 }
 
 export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge, onSelectNode, projects }: Props) {
@@ -500,26 +531,86 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
           },
           Workflow: { label: "name" },
           Step: { label: "action" },
-          // Hermes-first taxonomy nodes
-          Domain: {
-            label: "slug",
+          // Free-form taxonomy nodes — :Taxon with taxon_type property.
+          // Level 1 (hexagon): business-unit, domain
+          // Level 2 (diamond): service, entity, model, topic, table, ...
+          // Label format: "slug [type]"
+          Taxon: {
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
               static: {
-                shape: "hexagon",
-                size: 28,
+                font: { strokeWidth: 2, strokeColor: "#000000" },
+              },
+              function: {
+                label: (node: any) => {
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
+                  const slug = String(p.slug ?? "");
+                  const type = String(p.taxon_type ?? "");
+                  return type ? `${slug} [${type}]` : slug;
+                },
+                shape: (node: any) => {
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
+                  const level = Number(p.taxon_level ?? 2);
+                  return level === 1 ? "hexagon" : "diamond";
+                },
+                size: (node: any) => {
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
+                  const level = Number(p.taxon_level ?? 2);
+                  return level === 1 ? 28 : 18;
+                },
+                color: (node: any) => {
+                  const type = node?.raw?.properties?.taxon_type ?? node?.properties?.taxon_type ?? "";
+                  return TAXON_COLORS[type] ?? taxonColorByHash(type);
+                },
+                font: (node: any) => {
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
+                  const level = Number(p.taxon_level ?? 2);
+                  return level === 1
+                    ? { color: "#e9d5ff", size: 13, strokeWidth: 2, strokeColor: "#000", bold: true }
+                    : { color: "#ddd6fe", size: 11, strokeWidth: 2, strokeColor: "#000" };
+                },
+                title: (node: any) => {
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
+                  const el = document.createElement("div");
+                  el.style.cssText = "font-family:system-ui;font-size:12px;color:#e0e0e0;background:#111;padding:8px 10px;border-radius:6px;border:1px solid #333;min-width:160px;line-height:1.6;";
+                  const color = TAXON_COLORS[p.taxon_type]?.border ?? "#a78bfa";
+                  el.innerHTML = [
+                    `<div style="font-weight:600;font-size:13px;margin-bottom:4px;color:#fff">${escapeHtml(String(p.slug ?? "—"))}</div>`,
+                    `<div><span style="color:#888">type</span> <span style="color:${color}">${escapeHtml(String(p.taxon_type ?? "—"))}</span></div>`,
+                    p.description ? `<div style="color:#9ca3af;font-size:11px;margin-top:4px">${escapeHtml(String(p.description))}</div>` : "",
+                  ].join("");
+                  return el;
+                },
+              },
+            },
+          },
+          // Backward-compat: existing :Domain/:Entity nodes
+          Domain: {
+            [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
+              static: {
+                shape: "hexagon", size: 28,
                 color: { background: "#2d1457", border: "#a855f7", highlight: { background: "#3d1a6e", border: "#c084fc" } },
                 font: { color: "#e9d5ff", size: 13, strokeWidth: 2, strokeColor: "#000", bold: true },
+              },
+              function: {
+                label: (node: any) => {
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
+                  return `${p.slug ?? ""} [domain]`;
+                },
               },
             },
           },
           Entity: {
-            label: "slug",
             [NeoVis.NEOVIS_ADVANCED_CONFIG]: {
               static: {
-                shape: "diamond",
-                size: 18,
+                shape: "diamond", size: 18,
                 color: { background: "#1e1157", border: "#8b5cf6", highlight: { background: "#2d1a6e", border: "#a78bfa" } },
                 font: { color: "#ddd6fe", size: 11, strokeWidth: 2, strokeColor: "#000" },
+              },
+              function: {
+                label: (node: any) => {
+                  const p = node?.raw?.properties ?? node?.properties ?? {};
+                  return `${p.slug ?? ""} [entity]`;
+                },
               },
             },
           },
@@ -790,53 +881,57 @@ export default function GraphTab({ memories, selectedId, onSelect, onSelectEdge,
           // We query Neo4j directly to resolve the memory UUID from the internal ID.
           const neo4jInternalId = visNodeId;
           // Try to extract id from vis DataSet first (may already have Neo4j properties)
-          const nodeData = net?.body?.data?.nodes?.get?.(visNodeId);
-          const nodeProps = nodeData?.raw?.properties ?? nodeData?.properties ?? {};
-          let id = str(nodeProps.id) ?? str(nodeProps.uuid) ?? str(nodeProps.name) ?? null;
-          // Fallback: resolve via JARVIS server proxy (synchronous-style via await)
-          // We can't await in the event handler, so we trigger a synthetic select
-          // immediately with "loading" state and resolve async.
-          if (!id) {
-            // Signal "something was clicked" immediately so the panel opens.
-            // MnemosynePanel shows "loading…" until the real fetch completes.
-            onSelect("__resolving__");
-            fetch(`${PLUGIN_BASE}/node-by-neo4j-id?neo4jId=${neo4jInternalId}`)
-              .then((r) => r.json())
-              .then((result) => {
-                if (result?.memoryId) {
-                  onSelect(String(result.memoryId));
-                  if (onSelectNode) onSelectNode({ id: String(result.memoryId), edges: [] });
-                } else {
-                  onSelect(null); // not found — close panel
+          // Always resolve node properties from Neo4j by internal ID.
+          // This guarantees labels + slug/id are available for Domain, Entity, and Memory.
+          fetch(`http://127.0.0.1:7474/db/neo4j/tx/commit`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": "Basic bmVvNGo6" },
+            body: JSON.stringify({ statements: [{ statement:
+              `MATCH (n) WHERE id(n) = ${neo4jInternalId} RETURN labels(n) AS labels, properties(n) AS props`
+            }] }),
+          })
+            .then((r) => r.json())
+            .then((result) => {
+              const row = result?.results?.[0]?.data?.[0]?.row ?? [];
+              const labels: string[] = row[0] ?? [];
+              const props: Record<string,any> = row[1] ?? {};
+              const resolvedId   = str(props.id) ?? str(props.uuid) ?? null;
+              const resolvedSlug = str(props.slug) ?? null;
+              const isMemory = labels.includes("Memory");
+
+              if (isMemory && resolvedId) {
+                onSelect(resolvedId);
+                if (onSelectNode) {
+                  const connectedEdgeIds: any[] = net.getConnectedEdges?.(visNodeId) ?? [];
+                  const edges: SelectedEdge[] = connectedEdgeIds.map((eid: any) => {
+                    const be = net?.body?.edges?.[eid];
+                    const rp = be?.options?.raw?.properties ?? be?.raw?.properties
+                      ?? net?.body?.data?.edges?.get?.(eid)?.raw?.properties
+                      ?? net?.body?.data?.edges?.get?.(eid)?.properties ?? {};
+                    const cn: any[] = net.getConnectedNodes?.(eid) ?? [];
+                    const otherVisId = cn.find((n: any) => n !== visNodeId) ?? cn[0];
+                    return {
+                      relation: str(rp.relation) ?? "relates to",
+                      reason:   str(rp.reason),
+                      evidence: str(rp.evidence),
+                      fromTitle: getNodeTitle(cn[0]),
+                      toTitle:   getNodeTitle(cn[1]),
+                      otherId:   otherVisId != null ? getNodeId(otherVisId) : null,
+                    };
+                  });
+                  onSelectNode({ id: resolvedId, edges, labels, properties: props });
                 }
-              })
-              .catch(() => { onSelect(null); });
-            return;
-          }
-          if (id) {
-            onSelect(id);
-            if (onSelectNode) {
-              const connectedEdgeIds: any[] = net.getConnectedEdges?.(visNodeId) ?? [];
-              const edges: SelectedEdge[] = connectedEdgeIds.map((eid: any) => {
-                const be = net?.body?.edges?.[eid];
-                const rp = be?.options?.raw?.properties ?? be?.raw?.properties
-                  ?? net?.body?.data?.edges?.get?.(eid)?.raw?.properties
-                  ?? net?.body?.data?.edges?.get?.(eid)?.properties ?? {};
-                const cn: any[] = net.getConnectedNodes?.(eid) ?? [];
-                const otherVisId = cn.find((n: any) => n !== visNodeId) ?? cn[0];
-                return {
-                  relation: str(rp.relation) ?? "relates to",
-                  reason:   str(rp.reason),
-                  evidence: str(rp.evidence),
-                  fromTitle: getNodeTitle(cn[0]),
-                  toTitle:   getNodeTitle(cn[1]),
-                  otherId:   otherVisId != null ? getNodeId(otherVisId) : null,
-                };
-              });
-              onSelectNode({ id, edges });
-            }
-          }
+              } else if (resolvedSlug) {
+                // Domain or Entity
+                if (onSelectNode) onSelectNode({ id: resolvedSlug, edges: [], labels, properties: props });
+              } else {
+                onSelect(null);
+              }
+            })
+            .catch(() => onSelect(null));
           return;
+
+
         }
 
         // Edge-only click

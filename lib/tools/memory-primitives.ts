@@ -23,8 +23,7 @@
 
 import type { CapabilityDefinition } from "@jarvis/core";
 import type { Memory, Category } from "../types";
-import type { DomainCatalog, EntityCatalog } from "../catalogs";
-import { isValidSlug } from "../catalogs";
+import { TaxonCatalog, DomainCatalog, EntityCatalog, isValidSlug } from "../catalogs";
 
 /** Minimal store surface the primitives need — keeps the tools testable. */
 export interface PrimitiveStore {
@@ -34,9 +33,11 @@ export interface PrimitiveStore {
 /** Minimal graph surface for inline relations + taxonomy wiring. */
 export interface PrimitiveGraph {
   createExplicitEdge(fromId: string, toId: string, relation: string, reason: string): Promise<void>;
+  upsertTaxon(type: string, slug: string, description: string): Promise<void>;
   upsertDomain(slug: string, description: string): Promise<void>;
   upsertEntity(domain: string, slug: string, description: string): Promise<void>;
-  linkMemoryToTaxonomy(memoryId: string, domain: string, entity: string | null): Promise<void>;
+  linkMemoryToTaxonomy(memoryId: string, domain: string | null, entity: string | null): Promise<void>;
+  linkMemoryToTaxon(memoryId: string, slug: string): Promise<void>;
 }
 
 /** Mnemosyne id format — mirror EncoderV12: <session>-<ts>-<rand6>. */
@@ -76,82 +77,94 @@ export function makeWriterStats(): WriterStats {
   };
 }
 
-// ── new_domain ───────────────────────────────────────────────────────────────
+// ── new_taxon ────────────────────────────────────────────────────────────────
+//
+// Single tool that replaces new_domain + new_entity.
+// The LLM freely chooses the `type` (e.g. "business-unit", "domain",
+// "service", "entity", "model", "topic"). No hardcoded hierarchy.
+//
+// Palette examples (non-exhaustive — LLM can use any lowercase-hyphenated type):
+//   type: "business-unit"  → GBA, Payments, Lending
+//   type: "domain"         → deposit-platform, authorization, accounting
+//   type: "service"        → gdm, saa, sam, horadric, bag-of-holding
+//   type: "entity"         → deposit, simple-account, event-counter
+//   type: "model"          → account-snapshot, policy, tax-rule
+//   type: "topic"          → SIMPLE-ACCOUNT.AUTHORIZER.OPERATION-PROCESSED
+//   type: "table"          → docstore-settlement-request
+
+export function buildNewTaxonTool(catalog: TaxonCatalog, stats?: WriterStats, graph?: PrimitiveGraph): CapabilityDefinition {
+  return {
+    name: "new_taxon",
+    description:
+      "Register a taxonomy node in Mnemosyne before writing memories that reference it. " +
+      "Choose the `type` that best represents the concept — the type is free-form. " +
+      "Palette examples: 'business-unit' (GBA, Payments), 'domain' (deposit-platform), " +
+      "'service' (gdm, saa, sam), 'entity' (deposit, simple-account), " +
+      "'model' (account-snapshot), 'topic' (kafka topic name), 'table' (dynamodb table). " +
+      "Idempotent — registering an existing slug is a no-op. " +
+      "Call this BEFORE new_memory when the taxon doesn't exist yet.",
+    input_schema: {
+      type: "object",
+      properties: {
+        type: {
+          type: "string",
+          description: "Free-form type label, lowercase-hyphenated. e.g. 'domain', 'service', 'entity', 'model', 'business-unit', 'topic', 'table'",
+        },
+        slug: {
+          type: "string",
+          description: "Lowercase-hyphenated identifier slug. e.g. 'deposit-platform', 'gdm', 'simple-account'",
+        },
+        description: {
+          type: "string",
+          description: "One-line description of what this taxon represents",
+        },
+        level: {
+          type: "number",
+          description: "Visual level in graph: 1 = hexagon (broad/thematic, e.g. domain, business-unit), 2 = diamond (concrete/specific, e.g. service, entity, model). Default: 2.",
+        },
+      },
+      required: ["type", "slug", "description"],
+    },
+    handler: async (args: Record<string, unknown>) => {
+      const type = String(args.type ?? "").trim().toLowerCase();
+      const slug = String(args.slug ?? "").trim();
+      const description = String(args.description ?? "").trim();
+      const level = typeof args.level === "number" ? args.level : 2;
+      if (!isValidSlug(type)) return { ok: false, error: `invalid type '${type}' — must be lowercase-hyphenated` };
+      if (!isValidSlug(slug)) return { ok: false, error: `invalid slug '${slug}' — must be lowercase-hyphenated` };
+      if (!description) return { ok: false, error: "description is required" };
+      const { created } = await catalog.register(type, slug, description, level);
+      if (stats) {
+        stats.domainCalls++;
+        if (created) stats.domainsCreated++;
+      }
+      if (graph) await (graph as any).upsertTaxon ? (graph as any).upsertTaxon(type, slug, description, level).catch(() => {}) : graph.upsertDomain(slug, description).catch(() => {});
+      return { ok: true, type, slug, level, created, existed: !created };
+    },
+  };
+}
+
+// ── backward-compat shims ─────────────────────────────────────────────────────
+// new_domain and new_entity are kept for any agent that still calls them.
+// They delegate to new_taxon with fixed types.
 
 export function buildNewDomainTool(catalog: DomainCatalog, stats?: WriterStats, graph?: PrimitiveGraph): CapabilityDefinition {
-  return {
-    name: "new_domain",
-    description:
-      "Register a thematic DOMAIN in the Mnemosyne taxonomy before writing memories that reference it. " +
-      "A domain is a top-level theme (e.g. 'mnemosyne', 'saa', 'jarvis'). " +
-      "Idempotent — registering an existing domain is a no-op. " +
-      "Call this BEFORE new_memory when the memory's domain doesn't exist yet.",
-    input_schema: {
-      type: "object",
-      properties: {
-        slug: { type: "string", description: "Lowercase-hyphenated slug, e.g. 'memory-architecture'" },
-        description: { type: "string", description: "One-line description of what this domain covers" },
-      },
-      required: ["slug", "description"],
-    },
-    handler: async (args: Record<string, unknown>) => {
-      const slug = String(args.slug ?? "").trim();
-      const description = String(args.description ?? "").trim();
-      if (!isValidSlug(slug)) {
-        return { ok: false, error: `invalid slug '${slug}' — must be lowercase-hyphenated (a-z, 0-9, -)` };
-      }
-      if (!description) return { ok: false, error: "description is required" };
-      const { created } = await catalog.register(slug, description);
-      if (stats) { stats.domainCalls++; if (created) stats.domainsCreated++; }
-      // Mirror to Neo4j — idempotent MERGE, best-effort (graph may be degraded)
-      if (graph) await graph.upsertDomain(slug, description).catch(() => {});
-      return { ok: true, slug, created, existed: !created };
-    },
+  const taxonCatalog = (catalog as any).taxons as TaxonCatalog;
+  const inner = buildNewTaxonTool(taxonCatalog, stats, graph);
+  return { ...inner, name: "new_domain",
+    handler: (args: Record<string, unknown>) => (inner.handler as any)({ ...args, type: "domain" }),
   };
 }
 
-// ── new_entity ───────────────────────────────────────────────────────────────
-
-export function buildNewEntityTool(
-  domains: DomainCatalog,
-  entities: EntityCatalog,
-  stats?: WriterStats,
-  graph?: PrimitiveGraph,
-): CapabilityDefinition {
-  return {
-    name: "new_entity",
-    description:
-      "Register a named ENTITY scoped under an existing domain (e.g. domain 'mnemosyne' → entity 'BackgroundReviewPiece'). " +
-      "The domain MUST already exist (register it with new_domain first). " +
-      "Idempotent — registering an existing entity is a no-op.",
-    input_schema: {
-      type: "object",
-      properties: {
-        domain: { type: "string", description: "Existing domain slug this entity belongs to" },
-        slug: { type: "string", description: "Lowercase-hyphenated entity slug" },
-        description: { type: "string", description: "One-line description of the entity" },
-      },
-      required: ["domain", "slug", "description"],
-    },
-    handler: async (args: Record<string, unknown>) => {
-      const domain = String(args.domain ?? "").trim();
-      const slug = String(args.slug ?? "").trim();
-      const description = String(args.description ?? "").trim();
-      if (!isValidSlug(domain)) return { ok: false, error: `invalid domain slug '${domain}'` };
-      if (!isValidSlug(slug)) return { ok: false, error: `invalid entity slug '${slug}'` };
-      if (!description) return { ok: false, error: "description is required" };
-      if (!domains.has(domain)) {
-        return { ok: false, error: `domain '${domain}' does not exist — call new_domain('${domain}', ...) first` };
-      }
-      const { created } = await entities.register(domain, slug, description);
-      if (stats) { stats.entityCalls++; if (created) stats.entitiesCreated++; }
-      // Mirror to Neo4j — idempotent MERGE under its domain node, best-effort
-      if (graph) await graph.upsertEntity(domain, slug, description).catch(() => {});
-      return { ok: true, domain, slug, created, existed: !created };
-    },
+export function buildNewEntityTool(domains: DomainCatalog, entities: EntityCatalog, stats?: WriterStats, graph?: PrimitiveGraph): CapabilityDefinition {
+  const taxonCatalog = (entities as any).taxons as TaxonCatalog;
+  const inner = buildNewTaxonTool(taxonCatalog, stats, graph);
+  return { ...inner, name: "new_entity",
+    handler: (args: Record<string, unknown>) => (inner.handler as any)({ ...args, type: "entity" }),
   };
 }
 
+// ── new_memory ────────────────────────────────────────────────────────────────
 // ── new_memory ───────────────────────────────────────────────────────────────
 
 export interface RelationInput {
@@ -171,18 +184,31 @@ export function buildNewMemoryTool(
     name: "new_memory",
     description:
       "Write a fully-structured long-term memory DIRECTLY to Mnemosyne. " +
-      "You provide the final title, content, category, domain, and (optionally) entity, tags, confidence, and relations. " +
-      "STRICT: the referenced domain MUST exist (register via new_domain). If entity is given, it MUST exist under that domain (register via new_entity). " +
+      "You provide the final title, content, category, and optionally taxons (free-form taxonomy tags), tags, confidence, and relations. " +
+      "STRICT: any taxon slug referenced in `taxons` MUST exist (register via new_taxon first). " +
       "Write content already enriched with the domain terms you want embedded — there is no automatic enrichment. " +
-      "Use relations[] to create explicit graph edges to existing memories at write time.",
+      "Use relations[] to create explicit graph edges to existing memories at write time." +
+      "Backward-compat: `domain` and `entity` fields still accepted and mapped to taxons automatically.",
     input_schema: {
       type: "object",
       properties: {
         title: { type: "string", description: "Concise memory title" },
         content: { type: "string", description: "Full memory body. Write it already enriched with domain synonyms for good embedding." },
         category: { type: "string", description: "Memory category slug (e.g. architecture-decision, reasoning-pattern, value-priority, code-pattern)" },
-        domain: { type: "string", description: "Existing domain slug this memory belongs to (REQUIRED)" },
-        entity: { type: "string", description: "Optional existing entity slug within the domain" },
+        domain: { type: "string", description: "DEPRECATED — use taxons. Backward-compat: mapped to taxon type=domain automatically." },
+        entity: { type: "string", description: "DEPRECATED — use taxons. Backward-compat: mapped to taxon type=entity automatically." },
+        taxons: {
+          type: "array",
+          description: "Optional taxonomy tags. Each is a {type, slug} pair referencing a registered taxon. type is free-form (e.g. 'domain', 'service', 'entity'). MUST be registered via new_taxon first.",
+          items: {
+            type: "object",
+            properties: {
+              type: { type: "string", description: "Taxon type (e.g. 'domain', 'service', 'entity')" },
+              slug: { type: "string", description: "Taxon slug (must be registered)" },
+            },
+            required: ["type", "slug"],
+          },
+        },
         tags: { type: "array", items: { type: "string" }, description: "Optional tag slugs" },
         confidence: { type: "number", description: "Optional confidence 0–1 (default 0.9)" },
         project: { type: "string", description: "Optional project scope" },
@@ -201,7 +227,7 @@ export function buildNewMemoryTool(
           },
         },
       },
-      required: ["title", "content", "category", "domain"],
+      required: ["title", "content", "category"],
     },
     handler: async (args: Record<string, unknown>, meta?: { sessionId?: string }) => {
       const sessionId = meta?.sessionId ?? "main";

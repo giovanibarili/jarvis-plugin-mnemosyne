@@ -30,6 +30,27 @@ import type {
 
 const PLUGIN_BASE = "/plugins/jarvis-plugin-mnemosyne";
 
+// ── Taxon visual palette (mirrors GraphTab) ───────────────────────────────────
+const TAXON_TYPE_COLORS: Record<string, string> = {
+  "business-unit": "#c084fc",
+  "domain":        "#a855f7",
+  "service":       "#8b5cf6",
+  "entity":        "#818cf8",
+  "model":         "#0ea5e9",
+  "topic":         "#16a34a",
+  "table":         "#78716c",
+};
+
+const TAXON_TYPE_ICONS: Record<string, string> = {
+  "business-unit": "⬡",
+  "domain":        "⬡",
+  "service":       "◈",
+  "entity":        "◆",
+  "model":         "▲",
+  "topic":         "⬮",
+  "table":         "▪",
+};
+
 type ActiveTab = "list" | "graph" | "categories";
 
 interface Props {
@@ -110,48 +131,135 @@ export default function MnemosynePanel({ state }: Props) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Edges connected to the currently selected node (from graph click or Neo4j fetch)
   const [nodeEdges, setNodeEdges] = useState<import('./GraphTab').SelectedEdge[]>([]);
+  // Domain or Entity node selected from the graph (not a Memory)
+  const [selectedTaxon, setSelectedTaxon] = useState<{ type: string; slug: string; description?: string; } | null>(null);
 
-  // Fetch edges for a memory ID directly from Neo4j.
-  // Used when selection comes from the edge panel (no vis-network available).
-  const fetchEdgesForMemory = useCallback(async (memoryId: string) => {
+  // Fetch edges for a node (Memory, Domain, or Entity) directly from Neo4j.
+  // Returns edges with direction: outgoing (this->other) and incoming (other->this).
+  const fetchEdgesForNode = useCallback(async (nodeId: string, nodeLabel: "Memory" | "Domain" | "Entity" | "Taxon") => {
     try {
+      // For Memory: fetch Memory↔Memory semantic edges + Domain/Entity taxonomy edges
+      // For Domain/Entity: fetch all edges (HAS_ENTITY, BELONGS_TO, ABOUT, semantic)
+      const statement = nodeLabel === "Memory"
+        ? `
+            MATCH (m:Memory {id: $id})
+            OPTIONAL MATCH (m)-[r1]->(other1:Memory)
+            OPTIONAL MATCH (other2:Memory)-[r2]->(m)
+            OPTIONAL MATCH (m)-[r3:BELONGS_TO]->(d:Domain)
+            OPTIONAL MATCH (m)-[r4:ABOUT]->(e:Entity)
+            WITH m,
+                 collect(DISTINCT {rel: r1, target: other1, dir: "out", targetDesc: other1.evidence}) AS outEdges,
+                 collect(DISTINCT {rel: r2, target: other2, dir: "in",  targetDesc: other2.evidence}) AS inEdges,
+                 collect(DISTINCT {rel: r3, target: d,      dir: "out", targetDesc: d.description, kind: "domain"}) AS domEdges,
+                 collect(DISTINCT {rel: r4, target: e,      dir: "out", targetDesc: e.description, kind: "entity"}) AS entEdges
+            UNWIND (outEdges + inEdges + domEdges + entEdges) AS edge
+            WITH m, edge WHERE edge.rel IS NOT NULL
+            RETURN
+              type(edge.rel)                                   AS relType,
+              coalesce(edge.rel.relation, type(edge.rel))      AS relation,
+              coalesce(edge.rel.reason, edge.rel.evidence)     AS reason,
+              edge.targetDesc                                  AS targetDesc,
+              m.title                                          AS fromTitle,
+              coalesce(edge.target.title, edge.target.slug)    AS toTitle,
+              edge.target.id                                   AS otherId,
+              edge.target.slug                                 AS otherSlug,
+              edge.dir                                         AS direction,
+              coalesce(edge.kind, "memory")                    AS targetKind
+          `
+        : `
+            MATCH (n {slug: $id}) WHERE n:Taxon OR n:Domain OR n:Entity
+            MATCH (n)-[r]->(other)
+            RETURN
+              type(r)                                          AS relType,
+              coalesce(r.relation, type(r))                    AS relation,
+              coalesce(r.reason, r.evidence)                   AS reason,
+              coalesce(other.description, other.evidence)      AS targetDesc,
+              n.slug                                           AS fromTitle,
+              coalesce(other.title, other.slug)                AS toTitle,
+              other.id                                         AS otherId,
+              other.slug                                       AS otherSlug,
+              "out"                                            AS direction,
+              CASE WHEN other:Domain THEN "domain"
+                   WHEN other:Entity THEN "entity"
+                   ELSE "memory" END                          AS targetKind
+            UNION ALL
+            MATCH (n {slug: $id}) WHERE n:Domain OR n:Entity
+            MATCH (other)-[r]->(n)
+            RETURN
+              type(r)                                          AS relType,
+              coalesce(r.relation, type(r))                    AS relation,
+              coalesce(r.reason, r.evidence)                   AS reason,
+              coalesce(other.description, other.title, other.evidence) AS targetDesc,
+              n.slug                                           AS fromTitle,
+              coalesce(other.title, other.slug)                AS toTitle,
+              other.id                                         AS otherId,
+              other.slug                                       AS otherSlug,
+              "in"                                             AS direction,
+              CASE WHEN other:Domain THEN "domain"
+                   WHEN other:Entity THEN "entity"
+                   ELSE "memory" END                          AS targetKind
+          `;
+
       const res = await fetch("http://127.0.0.1:7474/db/neo4j/tx/commit", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": "Basic bmVvNGo6" },
-        body: JSON.stringify({ statements: [{
-          statement: `
-            MATCH (m:Memory {id: $id})-[r]-(other:Memory)
-            RETURN r.relation AS relation, r.reason AS reason, r.evidence AS evidence,
-                   m.title AS fromTitle, other.title AS toTitle, other.id AS otherId
-          `,
-          parameters: { id: memoryId },
-        }]}),
+        body: JSON.stringify({ statements: [{ statement, parameters: { id: nodeId } }] }),
       });
       if (!res.ok) return;
       const data = await res.json();
       const rows = data?.results?.[0]?.data ?? [];
-      const edges: import('./GraphTab').SelectedEdge[] = rows.map((row: any) => {
-        const [relation, reason, evidence, fromTitle, toTitle, otherId] = row.row ?? [];
+      const edges: (import('./GraphTab').SelectedEdge & { direction: "in" | "out"; targetKind: string; targetDesc: string | null })[] = rows.map((row: any) => {
+        const [relType, relation, reason, targetDesc, fromTitle, toTitle, otherId, otherSlug, direction, targetKind] = row.row ?? [];
         return {
-          relation: relation ?? "relates to",
-          reason:   reason ?? null,
-          evidence: evidence ?? null,
-          fromTitle: fromTitle ?? null,
-          toTitle:   toTitle ?? null,
-          otherId:   otherId ?? null,
+          relation:   relation ?? relType ?? "relates to",
+          reason:     reason ?? null,
+          evidence:   null,
+          targetDesc: targetDesc ?? null,
+          fromTitle:  fromTitle ?? null,
+          toTitle:    toTitle ?? null,
+          otherId:    otherId ?? otherSlug ?? null,
+          direction:  direction ?? "out",
+          targetKind: targetKind ?? "memory",
         };
       });
-      setNodeEdges(edges);
+      setNodeEdges(edges as any);
     } catch {
       // Neo4j unreachable — silently skip
     }
   }, []);
 
+  // Fetch full taxon node data (description + any extra props) from Neo4j.
+  const fetchTaxonDescription = useCallback(async (slug: string, nodeLabel: string) => {
+    try {
+      const stmt = `MATCH (n {slug: $slug}) WHERE n:Taxon OR n:Domain OR n:Entity RETURN n.description AS description LIMIT 1`;
+      void nodeLabel; // type used for intent only
+      const res = await fetch("http://127.0.0.1:7474/db/neo4j/tx/commit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Basic bmVvNGo6" },
+        body: JSON.stringify({ statements: [{ statement: stmt, parameters: { slug } }] }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const description = data?.results?.[0]?.data?.[0]?.row?.[0] ?? null;
+      if (description) {
+        setSelectedTaxon((prev) => prev?.slug === slug ? { ...prev, description } : prev);
+      }
+    } catch { /* Neo4j unreachable */ }
+  }, []);
+
+  // Whenever selectedTaxon changes, fetch its description if missing.
+  useEffect(() => {
+    if (!selectedTaxon || selectedTaxon.description) return;
+    fetchTaxonDescription(selectedTaxon.slug, selectedTaxon.type);
+  }, [selectedTaxon, fetchTaxonDescription]);
+
   // Whenever selectedId changes (from any source), load its edges from Neo4j.
+  // NOTE: do NOT clear selectedTaxon here — taxon selection sets selectedId=null intentionally.
   useEffect(() => {
     if (!selectedId) { setNodeEdges([]); return; }
-    fetchEdgesForMemory(selectedId);
-  }, [selectedId, fetchEdgesForMemory]);
+    setSelectedTaxon(null);
+    fetchEdgesForNode(selectedId, "Memory");
+  }, [selectedId, fetchEdgesForNode]);
 
   // Stable callbacks for GraphTab — must not be inline arrows or the neovis
   // useEffect will re-run (and destroy the graph) on every MnemosynePanel render.
@@ -163,9 +271,34 @@ export default function MnemosynePanel({ state }: Props) {
     // No longer used — edges are shown inside the node detail panel via onSelectNode
   }, []);
   const handleGraphSelectNode = useCallback((selection: import('./GraphTab').NodeSelection | null) => {
-    setSelectedId(selection?.id ?? null);
-    // nodeEdges will be populated by the useEffect above
-  }, []);
+    if (!selection) { setSelectedId(null); setSelectedTaxon(null); return; }
+
+    const nodeProps = (selection as any).properties ?? {};
+    const nodeLabels: string[] = (selection as any).labels ?? [];
+
+    // Detect Taxon: :Taxon/:Domain/:Entity label, taxon_type property, or heuristic (slug + no title/id/category)
+    const isTaxon = nodeLabels.includes("Taxon")
+      || nodeLabels.includes("Domain")
+      || nodeLabels.includes("Entity")
+      || !!nodeProps.taxon_type
+      || (!!nodeProps.slug && !nodeProps.title && !nodeProps.id && !nodeProps.category);
+
+    if (isTaxon) {
+      const slug = nodeProps.slug ?? selection.id;
+      // Prefer explicit taxon_type, then infer from Neo4j label, then fallback
+      const type: string = nodeProps.taxon_type
+        ?? (nodeLabels.includes("Domain") ? "domain"
+          : nodeLabels.includes("Entity") ? "entity"
+          : "taxon");
+      const description = nodeProps.description ?? null;
+      setSelectedTaxon({ type, slug, description });
+      setSelectedId(null);
+      fetchEdgesForNode(slug, "Taxon");
+    } else {
+      setSelectedTaxon(null);
+      setSelectedId(selection.id ?? null);
+    }
+  }, [fetchEdgesForNode]);
   // Memory fetched on demand when clicked node is not in the preloaded list
   const [fetchedMemory, setFetchedMemory] = useState<Memory | null>(null);
   const [fetchingMemory, setFetchingMemory] = useState<boolean>(false);
@@ -511,6 +644,82 @@ export default function MnemosynePanel({ state }: Props) {
           <PromptsTab />
         )}
 
+        {selectedTaxon && activeTab === "graph" ? (
+          <div style={styles.detail}>
+            <div style={styles.detailHeader}>
+              <div style={styles.detailTitle}>{selectedTaxon.slug}</div>
+              <button style={styles.closeBtn} onClick={() => { setSelectedTaxon(null); setNodeEdges([]); }} title="Close">✕</button>
+            </div>
+            <div style={styles.detailMeta}>
+              <span style={{
+                ...styles.detailChip,
+                color: TAXON_TYPE_COLORS[selectedTaxon.type] ?? "#9ca3af",
+                borderColor: (TAXON_TYPE_COLORS[selectedTaxon.type] ?? "#9ca3af") + "44",
+                fontWeight: 700,
+              }}>
+                {(TAXON_TYPE_ICONS[selectedTaxon.type] ?? "◆")} {selectedTaxon.type}
+              </span>
+            </div>
+            {selectedTaxon.description ? (
+              <div style={styles.detailContent}>{selectedTaxon.description}</div>
+            ) : (
+              <div style={{ ...styles.detailContent, color: "#6b7280", fontStyle: "italic" }}>no description</div>
+            )}
+            {nodeEdges.length > 0 ? (
+              <div style={styles.detailEvidenceWrap}>
+                <div style={styles.detailLabel}>connections ({nodeEdges.length})</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  {nodeEdges.map((e: any, i: number) => {
+                    const relColors: Record<string, string> = {
+                      "BELONGS_TO": "#a855f7", "ABOUT": "#8b5cf6", "HAS_ENTITY": "#6d28d9",
+                      "reinforces": "#10b981", "extends": "#3b82f6", "contradicts": "#ef4444",
+                      "supersede": "#a855f7", "derived_from": "#10b981",
+                    };
+                    const color = relColors[e.relation] ?? "#9ca3af";
+                    const isOut = e.direction === "out";
+                    const dirArrow = isOut ? "→" : "←";
+                    const otherLabel = isOut ? e.toTitle : e.fromTitle;
+                    return (
+                      <div key={i} style={{
+                        padding: "6px 8px", borderRadius: "4px",
+                        border: `1px solid ${color}44`, backgroundColor: "#0e0e0e",
+                        cursor: e.otherId ? "pointer" : "default",
+                      }}
+                        onClick={() => {
+                          if (!e.otherId) return;
+                          if (e.targetKind === "memory") {
+                            setSelectedTaxon(null); setSelectedId(e.otherId);
+                          } else {
+                            fetchEdgesForNode(e.otherId, e.targetKind === "domain" ? "Domain" : "Entity");
+                            setSelectedTaxon({ type: e.targetKind, slug: e.otherId });
+                          }
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span style={{ fontSize: "10px", color, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                            {dirArrow} {e.relation.replace(/_/g, " ")}
+                          </span>
+                          {otherLabel ? (
+                            <span style={{ fontSize: "11px", color: "#d1d5db", flex: 1, wordBreak: "break-word" }}>
+                              {otherLabel}
+                            </span>
+                          ) : null}
+                        </div>
+                        {e.reason ? (
+                          <div style={{ fontSize: "11px", color: "#9ca3af", lineHeight: 1.4, marginTop: "3px" }}>{e.reason}</div>
+                        ) : null}
+                        {(e as any).targetDesc && !(e as any).reason ? (
+                          <div style={{ fontSize: "11px", color: "#6b7280", lineHeight: 1.4, marginTop: "3px", fontStyle: "italic" }}>{(e as any).targetDesc}</div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         {(selected || (selectedId && fetchingMemory)) && activeTab !== "categories" ? (
           <div style={styles.detail}>
             <div style={styles.detailHeader}>
@@ -606,12 +815,15 @@ export default function MnemosynePanel({ state }: Props) {
                           ) : null}
                           {otherTitle ? (
                             <span style={{ fontSize: "11px", color: "#d1d5db", flex: 1, wordBreak: "break-word" }}>
-                              → {otherTitle}
+                              {(e as any).direction === "in" ? "← " : "→ "}{otherTitle}
                             </span>
                           ) : null}
                         </div>
                         {e.reason ? (
                           <div style={{ fontSize: "11px", color: "#9ca3af", lineHeight: 1.4 }}>{e.reason}</div>
+                        ) : null}
+                        {(e as any).targetDesc && !(e as any).reason ? (
+                          <div style={{ fontSize: "11px", color: "#6b7280", lineHeight: 1.4, marginTop: "2px", fontStyle: "italic" }}>{(e as any).targetDesc}</div>
                         ) : null}
                       </div>
                     );

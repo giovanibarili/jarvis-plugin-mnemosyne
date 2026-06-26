@@ -756,58 +756,76 @@ export class Neo4jAdapter {
   // All ops are MERGE — fully idempotent. Calling with the same slug twice
   // only updates description/updated_at, never creates duplicates.
 
-  /** Upsert a :Domain node. Called by new_domain tool after catalog.register(). */
+  /** Upsert a :Taxon node with a free-form type label. Called by new_taxon tool. */
+  async upsertTaxon(type: string, slug: string, description: string, level: number = 2): Promise<void> {
+    const s = this.session();
+    // Sanitize type → valid Neo4j label (PascalCase, no special chars)
+    const label = type.split("-").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join("");
+    try {
+      // :Taxon is always added; dynamic label is also added via APOC-free workaround:
+      // we use a property `taxon_type` and add the label via a second query.
+      await s.run(
+        `MERGE (n:Taxon {slug: $slug})
+         SET n.taxon_type  = $type,
+             n.taxon_level = $level,
+             n.description = $description,
+             n.updated_at  = $now`,
+        { slug, type, level, description, now: Date.now() },
+      );
+      // Add dynamic label — Neo4j 4.x+ supports SET n:Label syntax
+      await s.run(
+        `MATCH (n:Taxon {slug: $slug}) SET n:\`${label}\``,
+        { slug },
+      );
+    } finally {
+      await s.close();
+    }
+  }
+
+  /** Backward-compat shims — delegate to upsertTaxon */
   async upsertDomain(slug: string, description: string): Promise<void> {
-    const s = this.session();
-    try {
-      await s.run(
-        `MERGE (d:Domain {slug: $slug})
-         SET d.description = $description,
-             d.updated_at  = $now`,
-        { slug, description, now: Date.now() },
-      );
-    } finally {
-      await s.close();
-    }
+    return this.upsertTaxon("domain", slug, description);
   }
 
-  /** Upsert a :Entity node and wire it to its :Domain. Called by new_entity tool. */
   async upsertEntity(domain: string, slug: string, description: string): Promise<void> {
-    const s = this.session();
-    try {
-      await s.run(
-        `MERGE (d:Domain {slug: $domain})
-         MERGE (e:Entity {slug: $slug, domain: $domain})
-         SET e.description = $description,
-             e.updated_at  = $now
-         MERGE (d)-[:HAS_ENTITY]->(e)`,
-        { domain, slug, description, now: Date.now() },
-      );
-    } finally {
-      await s.close();
-    }
+    return this.upsertTaxon("entity", slug, description);
   }
 
-  /** Wire a :Memory node to its :Domain and optionally :Entity. Called by new_memory tool. */
-  async linkMemoryToTaxonomy(memoryId: string, domain: string, entity: string | null): Promise<void> {
+  /** Wire a :Memory node to its taxon nodes. Called by new_memory tool. */
+  async linkMemoryToTaxonomy(memoryId: string, domain: string | null, entity: string | null): Promise<void> {
     const s = this.session();
     try {
-      // Always link to domain
-      await s.run(
-        `MATCH (m:Memory {id: $memoryId})
-         MERGE (d:Domain {slug: $domain})
-         MERGE (m)-[:BELONGS_TO]->(d)`,
-        { memoryId, domain },
-      );
-      // Link to entity if provided
+      if (domain) {
+        await s.run(
+          `MATCH (m:Memory {id: $memoryId})
+           MERGE (n:Taxon {slug: $slug})
+           MERGE (m)-[:TAGGED]->(n)`,
+          { memoryId, slug: domain },
+        );
+      }
       if (entity) {
         await s.run(
           `MATCH (m:Memory {id: $memoryId})
-           MERGE (e:Entity {slug: $entity, domain: $domain})
-           MERGE (m)-[:ABOUT]->(e)`,
-          { memoryId, entity, domain },
+           MERGE (n:Taxon {slug: $slug})
+           MERGE (m)-[:TAGGED]->(n)`,
+          { memoryId, slug: entity },
         );
       }
+    } finally {
+      await s.close();
+    }
+  }
+
+  /** Wire a :Memory to any taxon by slug (type-agnostic). */
+  async linkMemoryToTaxon(memoryId: string, slug: string): Promise<void> {
+    const s = this.session();
+    try {
+      await s.run(
+        `MATCH (m:Memory {id: $memoryId})
+         MERGE (n:Taxon {slug: $slug})
+         MERGE (m)-[:TAGGED]->(n)`,
+        { memoryId, slug },
+      );
     } finally {
       await s.close();
     }
